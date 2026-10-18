@@ -1312,9 +1312,9 @@ impl ComposerPanel {
     }
 
     /// The one frame selected in the whole composition, as the row it is on and
-    /// where its note starts. `None` unless exactly one frame is selected
+    /// its position on that row. `None` unless exactly one frame is selected
     /// anywhere — a block of two says nothing about which one is meant.
-    fn single_selected(&self) -> Option<(usize, i64)> {
+    fn single_selected(&self) -> Option<(usize, usize)> {
         let mut found = None;
         for (idx, row) in self.rows.iter().enumerate() {
             let Some((first, last)) = row.sel_range() else {
@@ -1323,47 +1323,81 @@ impl ComposerPanel {
             if first != last || found.is_some() {
                 return None;
             }
-            found = Some((idx, row.starts()[first]));
+            found = Some((idx, first));
         }
         found
     }
 
-    /// Set row `target`'s lead so its first note starts where the one selected
-    /// note on *another* row starts — the way to bring a part in on a cue
-    /// without counting the lengths in front of it by eye.
+    /// Set one space on row `target` — its lead (`space == None`) or the space
+    /// tied to item `space` — so the note behind it lands on the one selected
+    /// note on *another* row: on where that note starts, or on where it ends
+    /// with its own space included. The way to bring a part in on a cue, or
+    /// after it, without counting the lengths in front of it by eye.
     ///
-    /// Does nothing but say why unless exactly one frame is selected and it is
-    /// on a different row: a row cannot be lined up with itself, and a lead
-    /// that moved its own cue would be chasing it.
-    fn lead_from_selected(&mut self, target: usize) {
-        let Some((from, at)) = self.single_selected() else {
-            self.status = "Select exactly one note, on another row, to take the lead from.".to_string();
+    /// Does nothing but say why — and leaves the cue selected, so it can be
+    /// tried again — unless exactly one frame is selected and it is on a
+    /// different row, and the space starts no later than the cue: a row cannot
+    /// be lined up with itself, a cue already behind the space would need a
+    /// negative length, and a space that moved its own cue would be chasing it.
+    fn align_space(&mut self, target: usize, space: Option<usize>, to: AlignTo) {
+        let Some((from, pos)) = self.single_selected() else {
+            self.status = "Select exactly one note, on another row, to align the space with.".to_string();
             return;
         };
         if from == target || target >= self.rows.len() {
             self.status = "The selected note is on this row — select one on another row.".to_string();
             return;
         }
-        // A lead is one length, so it can only be what the boxes can name.
+        let cue = {
+            let row = &self.rows[from];
+            let start = row.starts()[pos];
+            match to {
+                AlignTo::Start => start,
+                AlignTo::End => start + row.items[pos].total_units(),
+            }
+        };
+        let row = &self.rows[target];
+        let begins = match space {
+            None => 0,
+            Some(idx) => match row.items.get(idx) {
+                Some(item) => row.starts()[idx] + item.dur.units(),
+                None => return,
+            },
+        };
+        if begins > cue {
+            self.status = format!(
+                "{} already runs {} past the selected note's {} — nothing changed.",
+                row.label(),
+                span_label(begins - cue),
+                to.edge()
+            );
+            return;
+        }
+        // A space is one length, so it can only be what the boxes can name.
         // Anything else would leave the row off its cue by a fraction, which is
         // the exact thing this button is for avoiding.
-        let Some(lead) = Duration::exact(at) else {
+        let Some(len) = Duration::exact(cue - begins) else {
             self.status = format!(
-                "The selected note starts {} in — further than one lead can say.",
-                span_label(at)
+                "The selected note's {} is {} on — further than one space can say.",
+                to.edge(),
+                span_label(cue - begins)
             );
             return;
         };
         let source = self.rows[from].label();
-        // The cue has done its job: unticking it leaves the next lead free to
-        // be taken from another note without clearing this one by hand first.
+        // The cue has done its job: unticking it leaves the next space free to
+        // be aligned with another note without clearing this one by hand first.
         self.rows[from].sel = None;
         let row = &mut self.rows[target];
-        row.lead = lead;
+        match space {
+            None => row.lead = len,
+            Some(idx) => row.items[idx].space = len,
+        }
         self.status = format!(
-            "Lead of {} set to {} — in with the selected note on {source}.",
+            "Space on {} set to {} — in with the {} of the selected note on {source}.",
             row.label(),
-            lead.label()
+            len.label(),
+            to.edge()
         );
     }
 
@@ -2451,11 +2485,12 @@ impl ComposerPanel {
         // Deferred like the removal, and for the same reason: the status line
         // belongs to the panel, and the rows are borrowed for the whole loop.
         let mut renamed: Option<String> = None;
-        // Which row's lead button was pressed — applied after the loop, which
-        // has every row borrowed.
-        let mut derive_lead: Option<usize> = None;
-        // The row the one selected note is on, if exactly one is: every other
-        // row's lead button is live, and only those.
+        // Which space's align button was pressed — the row, the space on it
+        // (`None` for the lead) and which edge of the cue — applied after the
+        // loop, which has every row borrowed.
+        let mut align: Option<(usize, Option<usize>, AlignTo)> = None;
+        // The row the one selected note is on, if exactly one is: the align
+        // buttons on every other row's spaces are live, and only those.
         let cue_row = self.single_selected().map(|(idx, _)| idx);
         // One width for every head, from the width there is — less the row
         // frame's margins, which are inside what the lanes are given.
@@ -2722,29 +2757,6 @@ impl ComposerPanel {
                                                 row.sel = None;
                                             }
                                         }
-                                        if ui
-                                            .add_enabled(
-                                                cue_row.is_some_and(|c| c != idx),
-                                                egui::Button::new("⤵ lead"),
-                                            )
-                                            .on_hover_text(
-                                                "Derive this row's lead from the \
-                                                 selected note: set the silence before \
-                                                 the row's first note to the time from \
-                                                 the start of the composition to that \
-                                                 note, so this row comes in with it.\n\n\
-                                                 Live only while exactly one note is \
-                                                 selected, and on another row.",
-                                            )
-                                            .on_disabled_hover_text(
-                                                "Derive this row's lead from the \
-                                                 selected note.\n\nSelect exactly one \
-                                                 note, on another row, first.",
-                                            )
-                                            .clicked()
-                                        {
-                                            derive_lead = Some(idx);
-                                        }
                                     });
                                     ui.horizontal(|ui| {
                                         ui.checkbox(&mut row.enabled, "Enabled")
@@ -2795,14 +2807,18 @@ impl ComposerPanel {
                                 // them, which would otherwise clip the cards.
                                 .max_height(ROW_H + 12.0)
                                 .show(ui, |ui| {
-                                    Self::chain_ui(
+                                    let pressed = Self::chain_ui(
                                         ui,
                                         row,
                                         row_playhead,
                                         percussion[idx],
                                         wav[idx],
                                         spu,
+                                        cue_row.is_some_and(|c| c != idx),
                                     );
+                                    if let Some((space, to)) = pressed {
+                                        align = Some((idx, space, to));
+                                    }
                                 });
                         });
                     });
@@ -2810,8 +2826,8 @@ impl ComposerPanel {
             ui.add_space(4.0);
         }
 
-        if let Some(idx) = derive_lead {
-            self.lead_from_selected(idx);
+        if let Some((idx, space, to)) = align {
+            self.align_space(idx, space, to);
         }
         if let Some(name) = renamed {
             self.status = format!("Renamed a row to {name}.");
@@ -2833,6 +2849,11 @@ impl ComposerPanel {
     /// frame's length or pitch is immediate; everything after it simply shifts,
     /// because a frame's position is nothing but the sum of the lengths before
     /// it.
+    ///
+    /// `can_align` lights the align buttons on every space; the one pressed is
+    /// handed back — the space (`None` for the lead) and the cue's edge — for
+    /// the panel to apply, since the cue is on another row.
+    #[allow(clippy::too_many_arguments)]
     fn chain_ui(
         ui: &mut egui::Ui,
         row: &mut Row,
@@ -2840,7 +2861,8 @@ impl ComposerPanel {
         percussion: bool,
         wav: Option<f32>,
         spu: f64,
-    ) {
+        can_align: bool,
+    ) -> Option<(Option<usize>, AlignTo)> {
         // Follow the transport only while there *is* one for this lane — a row
         // that is switched off is handed no playhead at all — and only if the
         // lane was asked to: scrolling a lane every frame is exactly what stops
@@ -2851,6 +2873,7 @@ impl ComposerPanel {
         // Likewise the block: the row's selection is read for every frame in
         // the loop, so a click changes it once the row has been drawn.
         let mut pending_select: Option<(u64, bool)> = None;
+        let mut pending_align: Option<(Option<usize>, AlignTo)> = None;
         let sel = row.sel_range();
         // Taken before the frames are drawn, so an edit made in one frame moves
         // the ones behind it only on the next pass — never mid-loop.
@@ -2869,7 +2892,7 @@ impl ComposerPanel {
             // so it stays put when that note is deleted and leads the next one
             // instead. Drawn only when there is a note for it to lead.
             if !row.items.is_empty() {
-                Self::frame_ui(
+                let lead = Self::frame_ui(
                     ui,
                     row_id,
                     LEAD_SPACE_ID,
@@ -2877,8 +2900,11 @@ impl ComposerPanel {
                     &mut row.lead,
                     // The lead belongs to the row, not to an item: there is no
                     // block it could be part of, and nothing sounds in it.
-                    FrameState { sounding: false, percussion, selected: false },
+                    FrameState { sounding: false, percussion, selected: false, can_align },
                 );
+                if let Some(to) = lead.align {
+                    pending_align = Some((None, to));
+                }
             }
             for (idx, (item, start)) in row.items.iter_mut().zip(starts).enumerate() {
                 let selected = sel.is_some_and(|(a, b)| idx >= a && idx <= b);
@@ -2900,7 +2926,7 @@ impl ComposerPanel {
                         None => Frame::Note(&mut item.pitch),
                     },
                     &mut item.dur,
-                    FrameState { sounding, percussion, selected },
+                    FrameState { sounding, percussion, selected, can_align: false },
                 );
                 if note.deleted {
                     pending_delete = Some(idx);
@@ -2916,7 +2942,7 @@ impl ComposerPanel {
                 }
                 // The space tied to it, drawn right behind it and carrying no
                 // delete button of its own: it leaves only with its note.
-                Self::frame_ui(
+                let space = Self::frame_ui(
                     ui,
                     row_id,
                     item.id,
@@ -2924,8 +2950,11 @@ impl ComposerPanel {
                     &mut item.space,
                     // A space is never *sounding* — it is the silence — but it
                     // is in the block whenever its note is: they are one item.
-                    FrameState { sounding: false, percussion, selected },
+                    FrameState { sounding: false, percussion, selected, can_align },
                 );
+                if let Some(to) = space.align {
+                    pending_align = Some((Some(idx), to));
+                }
             }
         });
 
@@ -2935,6 +2964,7 @@ impl ComposerPanel {
         if let Some(idx) = pending_delete {
             row.delete_item(idx);
         }
+        pending_align
     }
 
     /// One frame. Reports whether its delete button was pressed and where it
@@ -2955,7 +2985,7 @@ impl ComposerPanel {
         dur: &mut Duration,
         state: FrameState,
     ) -> FrameOut {
-        let FrameState { sounding, percussion, selected } = state;
+        let FrameState { sounding, percussion, selected, can_align } = state;
         let space = matches!(kind, Frame::Space);
         let (fill, stroke, header) = match (space, sounding) {
             (true, _) => (
@@ -2991,6 +3021,7 @@ impl ComposerPanel {
 
         let mut deleted = false;
         let mut select = None;
+        let mut align = None;
         let card_w = kind.width();
         let placed = ui.allocate_ui_with_layout(
             egui::vec2(card_w, CARD_H),
@@ -3057,6 +3088,30 @@ impl ComposerPanel {
                                             .clicked()
                                     {
                                         deleted = true;
+                                    }
+                                    // Align with the one selected note on
+                                    // another row — right to left, so end then
+                                    // start reads start, end on the card.
+                                    if space {
+                                        for to in [AlignTo::End, AlignTo::Start] {
+                                            if ui
+                                                .add_enabled(
+                                                    can_align,
+                                                    egui::Button::new(to.icon())
+                                                        .small()
+                                                        .frame(false),
+                                                )
+                                                .on_hover_text(to.hint())
+                                                .on_disabled_hover_text(format!(
+                                                    "{}\n\nSelect exactly one note, on \
+                                                     another row, first.",
+                                                    to.title()
+                                                ))
+                                                .clicked()
+                                            {
+                                                align = Some(to);
+                                            }
+                                        }
                                     }
                                     // Fit the length to the file. Only a wav
                                     // note has a length that *something* is the
@@ -3237,6 +3292,7 @@ impl ComposerPanel {
         FrameOut {
             deleted,
             select,
+            align,
             rect: placed.response.rect,
         }
     }
@@ -3638,7 +3694,56 @@ impl Frame<'_> {
     }
 }
 
-/// What a frame is besides its length — the three things it is drawn against,
+/// Which edge of the one selected note a space's align button lines the note
+/// behind the space up with.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AlignTo {
+    /// Where the cue note starts: the two notes come in together.
+    Start,
+    /// Where the cue note ends, *its space included*: this note comes in on
+    /// whatever would have followed it.
+    End,
+}
+
+impl AlignTo {
+    fn icon(self) -> &'static str {
+        match self {
+            AlignTo::Start => "⤵",
+            AlignTo::End => "⏭",
+        }
+    }
+
+    /// What the edge is called in the status line.
+    fn edge(self) -> &'static str {
+        match self {
+            AlignTo::Start => "start",
+            AlignTo::End => "end",
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            AlignTo::Start => "Align with start",
+            AlignTo::End => "Align to end",
+        }
+    }
+
+    fn hint(self) -> String {
+        let what = match self {
+            AlignTo::Start => "starts where the selected note starts",
+            AlignTo::End => "starts where the selected note ends, with its space included",
+        };
+        format!(
+            "{}: set this space so the note behind it {what}.\n\n\
+             Live only while exactly one note is selected, and on another row. If \
+             this space already starts past that point, nothing changes and the \
+             note stays selected; it is unticked once the space is set.",
+            self.title()
+        )
+    }
+}
+
+/// What a frame is besides its length — the four things it is drawn against,
 /// travelling together because three bare `bool`s at a call site say nothing
 /// about which is which.
 #[derive(Clone, Copy)]
@@ -3649,6 +3754,9 @@ struct FrameState {
     percussion: bool,
     /// It is in the selected block.
     selected: bool,
+    /// Exactly one note is selected, on another row, so a space's align buttons
+    /// have a cue to align with.
+    can_align: bool,
 }
 
 struct FrameOut {
@@ -3657,6 +3765,8 @@ struct FrameOut {
     /// Its select box was pressed, and whether shift was down — which extends
     /// the block onto this frame instead of starting a new one.
     select: Option<bool>,
+    /// A space's align button was pressed, and which edge of the cue it was.
+    align: Option<AlignTo>,
     /// Where it landed, so a lane that follows the transport can scroll the
     /// sounding frame into the middle of itself.
     rect: egui::Rect,
@@ -4553,9 +4663,8 @@ mod tests {
             found[0]
         };
 
-        // Every card: its header — right-aligned, so it ends over the boxes'
-        // own column — and then everything painted in that column beneath it,
-        // top to bottom. Reading the column back whole is what makes this a test
+        // Every card: its header, the card it is painted on, and then
+        // everything painted on that card beneath it, top to bottom. Reading the column back whole is what makes this a test
         // of the *card* rather than of one string: a box that landed on the
         // neighbouring card, or one that did not draw at all, changes the list.
         for (header, boxes) in [
@@ -4564,11 +4673,13 @@ mod tests {
             ("space · 1 + 5/16", vec!["1 whole", "× 5", "1/16"]),
         ] {
             let top = at(header);
+            let card = *cards
+                .iter()
+                .find(|c| c.contains(top))
+                .unwrap_or_else(|| panic!("{header:?} is painted on no card: {cards:?}"));
             let mut column: Vec<&(String, egui::Pos2)> = texts
                 .iter()
-                .filter(|(_, p)| {
-                    p.y > top.y && p.y < top.y + CARD_H && p.x <= top.x && p.x > top.x - CARD_W
-                })
+                .filter(|(_, p)| p.y > top.y && card.contains(*p))
                 .collect();
             column.sort_by(|a, b| a.1.y.total_cmp(&b.1.y));
             let painted: Vec<&str> = column.iter().map(|(t, _)| t.as_str()).collect();
@@ -6211,10 +6322,11 @@ mod tests {
         crate::audio::write_wav_i16(std::path::Path::new(&out), &samples, 2, 44100).unwrap();
     }
 
-    /// The lead button lines a row up on the one note selected on another row:
-    /// the row's first note then starts exactly where that note does.
+    /// The align buttons line a space up on the one note selected on another
+    /// row: on the lead, the row's first note then starts exactly where that
+    /// note does.
     #[test]
-    fn lead_from_selected_starts_the_row_on_the_selected_note() {
+    fn align_lead_starts_the_row_on_the_selected_note() {
         let q = frac(Fraction::Quarter);
         let e = frac(Fraction::Eighth);
         let mut panel = panel_with_rows(&[&[(60, q, e), (62, q, e), (64, q, e)], &[(48, q, e)]]);
@@ -6222,7 +6334,7 @@ mod tests {
         let cue = panel.rows[0].items[2].id;
         panel.rows[0].select_item(cue, false);
 
-        panel.lead_from_selected(1);
+        panel.align_space(1, None, AlignTo::Start);
 
         let want = UNITS_PER_WHOLE + 2 * (QUARTER + EIGHTH);
         assert_eq!(panel.rows[1].lead.units(), want);
@@ -6230,32 +6342,82 @@ mod tests {
         assert_eq!(panel.rows[0].sel, None, "the cue is unticked once it has been used");
     }
 
-    /// Anything but exactly one note on another row leaves the lead alone: no
+    /// A space behind a note works the same, measured from where the note in
+    /// front of it ends; aligned to the end, the next note lands where the
+    /// cue's own space runs out.
+    #[test]
+    fn align_space_to_the_end_of_the_selected_note() {
+        let q = frac(Fraction::Quarter);
+        let e = frac(Fraction::Eighth);
+        let mut panel = panel_with_rows(&[&[(60, q, e), (62, q, e), (64, q, e)], &[(48, q, e), (50, q, e)]]);
+        let cue = panel.rows[0].items[1].id;
+        panel.rows[0].select_item(cue, false);
+
+        panel.align_space(1, Some(0), AlignTo::End);
+
+        assert_eq!(note_starts(&panel)[1][1], note_starts(&panel)[0][2]);
+        assert_eq!(panel.rows[1].items[0].space.units(), QUARTER + 2 * EIGHTH);
+        assert_eq!(panel.rows[0].sel, None);
+
+        panel.rows[0].select_item(cue, false);
+        panel.align_space(1, Some(0), AlignTo::Start);
+        assert_eq!(note_starts(&panel)[1][1], note_starts(&panel)[0][1]);
+    }
+
+    /// A space that already starts past the cue cannot reach back to it: it is
+    /// left alone, and so is the selection, so another space can be tried.
+    #[test]
+    fn align_space_past_the_cue_changes_nothing() {
+        let q = frac(Fraction::Quarter);
+        let e = frac(Fraction::Eighth);
+        let mut panel = panel_with_rows(&[&[(60, q, e), (62, q, e)], &[(48, q, e), (50, q, e)]]);
+        panel.rows[1].lead = Duration::new(1, Fraction::None);
+        let cue = panel.rows[0].items[1].id;
+        panel.rows[0].select_item(cue, false);
+
+        panel.align_space(1, Some(0), AlignTo::End);
+
+        assert_eq!(panel.rows[1].items[0].space, e, "the space was changed");
+        assert_eq!(panel.rows[0].sel, Some((cue, cue)), "the cue was unticked");
+    }
+
+    /// Anything but exactly one note on another row leaves the space alone: no
     /// selection, a block of two, or the note being on the row itself.
     #[test]
-    fn lead_from_selected_needs_exactly_one_note_on_another_row() {
+    fn align_space_needs_exactly_one_note_on_another_row() {
         let q = frac(Fraction::Quarter);
         let e = frac(Fraction::Eighth);
         let mut panel = panel_with_rows(&[&[(60, q, e), (62, q, e)], &[(48, q, e)]]);
         let keep = frac(Fraction::Sixteenth);
         panel.rows[1].lead = keep;
 
-        panel.lead_from_selected(1);
+        panel.align_space(1, None, AlignTo::Start);
         assert_eq!(panel.rows[1].lead, keep, "nothing selected");
 
         panel.rows[0].select_all();
-        panel.lead_from_selected(1);
+        panel.align_space(1, None, AlignTo::Start);
         assert_eq!(panel.rows[1].lead, keep, "two notes selected");
 
         panel.rows[0].sel = None;
         let own = panel.rows[1].items[0].id;
         panel.rows[1].select_item(own, false);
-        panel.lead_from_selected(1);
+        panel.align_space(1, None, AlignTo::Start);
         assert_eq!(panel.rows[1].lead, keep, "the note is on this row");
 
         let other = panel.rows[0].items[1].id;
         panel.rows[0].select_item(other, false);
-        panel.lead_from_selected(1);
+        panel.align_space(1, None, AlignTo::End);
         assert_eq!(panel.rows[1].lead, keep, "one note on each row is two notes");
+    }
+
+    /// The align buttons' icons are real glyphs in egui's fonts, not tofu.
+    #[test]
+    fn align_icons_have_glyphs() {
+        let ctx = egui::Context::default();
+        let _ = ctx.run(Default::default(), |_| {});
+        let id = egui::FontId::proportional(14.0);
+        for to in [AlignTo::Start, AlignTo::End] {
+            assert!(ctx.fonts(|f| f.has_glyphs(&id, to.icon())), "{} tofus", to.icon());
+        }
     }
 }
