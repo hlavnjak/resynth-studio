@@ -1185,12 +1185,15 @@ const CEILING: f32 = 1.0;
 /// voice being rendered, and the limiters. Each voice has its own, so a row
 /// boosted past full scale is turned down by itself instead of ducking the
 /// whole composition every time it peaks; the master's catches what is left
-/// when several loud rows land together.
+/// when several loud rows land together — the bass first, so a sub played at
+/// full scale makes room for the drums instead of ducking them with everything
+/// else (see [`Limiter::low_band`]).
 struct MixBus {
     /// One voice's block, summed into the mix once its limiter has seen it.
     /// Reused across voices and blocks: an audio callback allocates nothing.
     scratch: Vec<f32>,
     voices: Vec<Limiter>,
+    master_low: Limiter,
     master: Limiter,
 }
 
@@ -1201,15 +1204,17 @@ impl MixBus {
             voices: (0..voices)
                 .map(|_| Limiter::new(channels, sample_rate, CEILING))
                 .collect(),
+            master_low: Limiter::low_band(channels, sample_rate, CEILING),
             master: Limiter::new(channels, sample_rate, CEILING),
         }
     }
 
     /// How far behind its own clock the mix runs: a voice's limiter looks ahead,
-    /// and then the master's does it again. Every limiter here is built at the
-    /// one rate, so they cost the same.
+    /// and then the master's two do it again — the bass one by its split's delay
+    /// on top. Every voice's limiter is built at the one rate, so they cost the
+    /// same.
     fn latency_frames(&self) -> usize {
-        2 * self.master.latency_frames()
+        self.master.latency_frames() * 2 + self.master_low.latency_frames()
     }
 }
 
@@ -1348,6 +1353,7 @@ fn mix_block(
         }
     }
 
+    bus.master_low.process(out);
     bus.master.process(out);
     // The limiter holds the ceiling on its own; this is the belt to its braces,
     // and costs a compare on a buffer the device is about to read anyway.
