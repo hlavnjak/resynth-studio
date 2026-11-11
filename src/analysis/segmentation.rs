@@ -125,6 +125,11 @@ const REASONABLE_CONFIDENCE: f32 = 0.75;
 /// Pitch tolerance when merging frames: ~1 semitone (2^(1/12) ≈ 1.059).
 const MERGE_RATIO: f32 = 1.06;
 
+/// How far past the first qualifying NAC peak the true period's peak can still
+/// be: side peaks sit one formant cycle from it, and a first formant at 500 Hz
+/// under a 100 Hz voice puts one 20% short. Well under 2, where the octave is.
+const SAME_LOBE: f32 = 1.35;
+
 struct FramePitch {
     freq: f32,
     confidence: f32,
@@ -186,6 +191,19 @@ fn estimate_frame_pitch(frame: &[f32], sample_rate: f32) -> FramePitch {
             chosen = lag;
             chosen_val = nac[lag];
             break;
+        }
+    }
+    // …and then the *top* of that peak's lobe, which the first local maximum
+    // need not be. A formant ripples the NAC, so the true period's peak has side
+    // peaks a formant cycle either side of it, and on a voice they clear the
+    // threshold too (0.90 against 0.99, at lag 412 against 424). Stopping on the
+    // first reads the pitch 3% sharp. Anything higher within reach is the same
+    // lobe — the next period's peak is a whole octave away, far past this.
+    let reach = ((chosen as f32 * SAME_LOBE).ceil() as usize).min(max_lag - 1);
+    for lag in (chosen + 1)..=reach {
+        if nac[lag] > chosen_val && nac[lag] >= nac[lag - 1] && nac[lag] >= nac[lag + 1] {
+            chosen = lag;
+            chosen_val = nac[lag];
         }
     }
 
@@ -398,6 +416,37 @@ mod tests {
                 (1200.0 * (lag / lag.round()).log2()).abs() > 8.0,
                 "test frequency {} lands on a whole lag; pick another",
                 freq
+            );
+        }
+    }
+
+    /// A voice's formant ripples the autocorrelation: beside the peak at the true
+    /// period sit side peaks one formant cycle away, and they clear the
+    /// first-peak threshold. Taking the first of them read a 104 Hz voice as
+    /// 107 Hz — 3% short, for half the note — so every "one period" bucket the
+    /// plugin cut was an incomplete cycle, and every key but the source's own
+    /// played the missing piece as a phase jump at each splice.
+    #[test]
+    fn a_formant_side_peak_is_not_the_period() {
+        let sr = 44_100.0f32;
+        let period = 424.3f32;
+        let w = 2.0 * std::f32::consts::PI / period;
+        let samples: Vec<f32> = (0..sr as usize / 2)
+            .map(|i| {
+                let t = i as f32 * w;
+                let low: f32 = (1..=3).map(|k| (k as f32 * t).sin()).sum();
+                // A strong formant around the 32nd harmonic.
+                let formant = (32.0 * t).sin() + (33.0 * t + 1.0).sin();
+                0.2 * low + 0.18 * formant
+            })
+            .collect();
+        let subs = segment(&samples, sr);
+        assert!(!subs.is_empty(), "the tone must be found");
+        let want = sr / period;
+        for &(_, f) in &subs[0].pitch_track {
+            assert!(
+                (f / want - 1.0).abs() < 0.003,
+                "tracked {f:.2} Hz, the period says {want:.2}"
             );
         }
     }
