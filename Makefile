@@ -9,6 +9,23 @@ FOURIER_SO := $(FOURIER_DIR)/target/$(LINUX_TARGET)/release/liblesynth_fourier.s
 WIN_TARGET := x86_64-pc-windows-gnu
 FOURIER_DLL := $(FOURIER_DIR)/target/$(WIN_TARGET)/release/lesynth_fourier.dll
 
+# `cargo build` for Windows, run from the crate's own directory.
+#
+# Rust's windows-gnu target links `-lgcc_eh`. Since GCC 16 a mingw toolchain
+# built without shared libgcc keeps the unwinder inside libgcc.a and ships no
+# libgcc_eh.a at all, so the link dies with "cannot find -lgcc_eh". When the
+# compiler does not know the library (it then echoes the bare name back), an
+# empty archive under target/ stands in for it: everything it used to hold is
+# already on the link line. Older toolchains are left alone.
+MINGW_CC ?= x86_64-w64-mingw32-gcc
+MINGW_AR ?= x86_64-w64-mingw32-ar
+win_cargo = if [ "$$($(MINGW_CC) -print-file-name=libgcc_eh.a)" = libgcc_eh.a ]; then \
+		mkdir -p target/mingw-compat && \
+		{ [ -f target/mingw-compat/libgcc_eh.a ] || $(MINGW_AR) rcs target/mingw-compat/libgcc_eh.a; } && \
+		export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS="$${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS:+$$CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS }-L native=$$PWD/target/mingw-compat" || exit 1; \
+	fi; \
+	cargo build --release --target $(WIN_TARGET)
+
 # ── macOS (cross via zig) ───────────────────────────────────────────────────
 # Both architectures are built and fused with lipo into one universal binary,
 # so the same app runs on Intel Macs and on Apple silicon.
@@ -115,7 +132,7 @@ $(INTERNAL_PLUGINS)/lesynth_fourier.dll: $(FOURIER_DLL)
 
 # Build the lesynth-fourier VST3 plugin (release, Windows).
 fourier-windows $(FOURIER_DLL): $(FOURIER_SRCS)
-	cd $(FOURIER_DIR) && cargo build --release --target $(WIN_TARGET)
+	cd $(FOURIER_DIR) && { $(win_cargo); }
 
 # Fuse the two freshly built Mac slices of the plugin into internal_plugins/.
 copy-internal-macos fourier-macos: $(INTERNAL_PLUGINS)/liblesynth_fourier.dylib
@@ -137,7 +154,7 @@ endif
 
 # Build for Windows, embedding the VST3 plugin.
 build-windows: copy-internal-windows
-	cargo build --release --target $(WIN_TARGET)
+	$(win_cargo)
 
 # ── macOS cross build ───────────────────────────────────────────────────────
 
