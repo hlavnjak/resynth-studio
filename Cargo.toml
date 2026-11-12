@@ -1,6 +1,6 @@
 [package]
 name = "resynth-studio"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 # The crate also ships `src/bin/dump_render.rs`, a debugging tool. Without this,
 # two binaries make a bare `cargo run` ambiguous and it refuses to start.
