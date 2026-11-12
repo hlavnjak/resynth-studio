@@ -141,7 +141,7 @@ fn pick_module_in(dir: &Path, bundle: &Path) -> Option<PathBuf> {
 
 /// Check that `path` really is a loadable VST3, without starting the plugin up.
 ///
-/// This is what the Tracks panel calls the moment a plugin is picked, so the two
+/// This is what the Instruments panel calls the moment a plugin is picked, so the two
 /// ways a choice can be wrong — a library the loader cannot satisfy, and a file
 /// that is not a VST3 at all — are reported there and then rather than surfacing
 /// much later as "Open editor failed". Returns the resolved module path.

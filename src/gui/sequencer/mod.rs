@@ -11,9 +11,9 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! Track Composer — arrange the registered Tracks in rows of frames and play them.
+//! Sequencer — arrange the registered Instruments in rows of frames and play them.
 //!
-//! **A row is a sequence, not a canvas.** It plays one Track (several rows may
+//! **A row is a sequence, not a canvas.** It plays one Instrument (several rows may
 //! share it) as a chain of frames laid left to right, each simply played after
 //! the one before: nothing is positioned, dragged, or overlapping. Rows sound
 //! together exactly to the extent that the lengths before a frame add up the
@@ -39,23 +39,23 @@
 //! select box puts it in the **block**, which is a stretch of frames spanning
 //! any number of rows at once: "Span Rows" takes the same stretch of *time* out
 //! of every row, "Clone" repeats the block in place on all of them, and
-//! "Copy"/"Paste at End" carry it to the end of the composition. What keeps the
+//! "Copy"/"Paste at End" carry it to the end of the sequence. What keeps the
 //! rows in step through all of it is that a copy occupies the block's window —
 //! the time from its first note to the end of its last space — rather than the
-//! frames' own extent; see [`ComposerPanel::clone_block`].
+//! frames' own extent; see [`SequencerPanel::clone_block`].
 //!
 //! **A repeat can be trimmed at either end.** "Repeat" loops the whole written
 //! length by default; the two lengths beneath the transport say where it starts
-//! and where it stops, each counted **from the beginning of the composition** —
+//! and where it stops, each counted **from the beginning of the sequence** —
 //! lengths rather than timestamps, because that is the only vocabulary the
 //! panel has, and from the same end as each other so the pair can be read
 //! against each other at a glance. A stop of zero is the end of the
-//! composition. Play with Repeat ticked starts at the window's start, so every
+//! sequence. Play with Repeat ticked starts at the window's start, so every
 //! pass — the first one too — is the window. See
-//! [`ComposerPanel::repeat_span_units`].
+//! [`SequencerPanel::repeat_span_units`].
 //!
 //! **Rows can also be played in rather than written.** "Record & Play Once"
-//! plays the composition through once and captures a MIDI keyboard against it,
+//! plays the sequence through once and captures a MIDI keyboard against it,
 //! rounding what was played onto a chosen note value and appending it as new
 //! rows — see [`record`].
 
@@ -72,10 +72,10 @@ use std::time::Instant;
 use eframe::egui;
 
 use self::player::{
-    CompositionPlayer, LoopSpan, PlannedNote, PreparedComposition, RowEdit, RowPlan,
+    SequencePlayer, LoopSpan, PlannedNote, PreparedSequence, RowEdit, RowPlan,
 };
 use crate::midi::{add_midi_tap, gm_percussion_name, MidiTap, MidiTaps};
-use super::registry::TrackRegistry;
+use super::registry::InstrumentRegistry;
 
 /// Time resolution: a whole note is this many units. 256 makes every fraction in
 /// [`Fraction`] — down to a 1/256 — a whole number of them, so lengths and the
@@ -92,7 +92,7 @@ const CARD_W: f32 = 108.0;
 ///
 /// It carries a control none of the others do — the slider that says where in
 /// the file the note starts — and that slider is the one thing on a frame whose
-/// usefulness is measured in pixels: over a six-second recording, a track this
+/// usefulness is measured in pixels: over a six-second recording, an instrument this
 /// panel's ordinary width would move the start by sixty milliseconds a pixel,
 /// which is most of the distance between landing on the beat and landing behind
 /// it. Frames are laid side by side and nothing lines up across rows, so a
@@ -131,7 +131,7 @@ const CARD_FILLS: [egui::Color32; 5] = [
 ];
 /// Height of one row's lane. The frames plus a little air around them.
 const ROW_H: f32 = CARD_H + 10.0;
-/// The row head (name, track select, add-note, gain) takes this share of the
+/// The row head (name, instrument select, add-note, gain) takes this share of the
 /// lanes' width, between the two bounds below. Every row's head is exactly the
 /// same width, so every lane — and with it every lead frame — starts at the
 /// same x: a head sized by its own contents put a row playing a long file name
@@ -139,7 +139,7 @@ const ROW_H: f32 = CARD_H + 10.0;
 const HEAD_FRAC: f32 = 0.3;
 /// Narrowest head: what the widest fixed line (add-note, gain, auto) needs.
 const HEAD_W_MIN: f32 = 420.0;
-/// Widest head: past this a longer track name is not worth the lane it costs.
+/// Widest head: past this a longer instrument name is not worth the lane it costs.
 const HEAD_W_MAX: f32 = 640.0;
 /// Room beside a full-width box for the small button that goes with it (the
 /// rename pencil, the row's bin).
@@ -147,7 +147,7 @@ const HEAD_BUTTON_W: f32 = 40.0;
 
 /// The loudest a row may be set to, +34 dB. Well past unity: a drum sampled
 /// quietly, or a resynthesised voice analysed well below full scale, has to
-/// come up to a lead rather than the whole rest of the composition coming down
+/// come up to a lead rather than the whole rest of the sequence coming down
 /// to it, and a source peaking at -30 dBFS needs more than eight times. The mix
 /// limits at full scale, which is what limits how much of this is useful — past
 /// the point where the peaks are being held down, more gain only compresses.
@@ -170,7 +170,7 @@ const DEFAULT_DRUM_PITCH: u8 = 36;
 /// Largest whole-note count a length may carry.
 const MAX_WHOLES: u16 = 16;
 /// …except in the repeat window, whose two lengths are counted from the very
-/// beginning of the composition and so have to reach anywhere in a long piece.
+/// beginning of the sequence and so have to reach anywhere in a long piece.
 const MAX_REPEAT_WHOLES: u16 = 2048;
 /// Largest nominator — how many of its fraction a length may carry. Sixteen,
 /// like [`MAX_WHOLES`]: beyond that the whole-note box says the same thing in
@@ -528,7 +528,7 @@ impl Item {
     }
 }
 
-/// One lane: a Track and the chain of frames played on it.
+/// One lane: an Instrument and the chain of frames played on it.
 struct Row {
     /// Stable id, so egui widget state survives rows being removed above them.
     id: u64,
@@ -546,10 +546,10 @@ struct Row {
     /// half-typed name is not yet the row's name, and so a box the user thinks
     /// better of is abandoned by simply not pressing the button.
     name_edit: String,
-    /// The Track this row plays, by registry id. `None` only while the registry
+    /// The Instrument this row plays, by registry id. `None` only while the registry
     /// is empty.
-    track_id: Option<u64>,
-    /// How loud the row plays, `1.0` being the track's own level. Up to
+    instrument_id: Option<u64>,
+    /// How loud the row plays, `1.0` being the instrument's own level. Up to
     /// [`GAIN_MAX`], so a quiet source can be lifted rather than every other
     /// row having to be pulled down around it.
     gain: f32,
@@ -559,7 +559,7 @@ struct Row {
     lead: Duration,
     /// Play this row. On by default — a row exists to be heard — and off takes
     /// it out of the transport and out of an export, while leaving everything
-    /// on it exactly where it is: the notes, the block, the track it plays.
+    /// on it exactly where it is: the notes, the block, the instrument it plays.
     ///
     /// This is how a part is listened to without being deleted: mute the two
     /// rows that are drowning it, hear the one that is not working, put them
@@ -567,7 +567,7 @@ struct Row {
     /// loses the work.
     ///
     /// The lane is still drawn, and still counts towards the length of the
-    /// composition: it is silent, not gone.
+    /// sequence: it is silent, not gone.
     enabled: bool,
     /// Re-export this row's LeSynth grid into the project folder on every save.
     /// On by default, so a project saved after an edit carries the edit; off
@@ -575,19 +575,19 @@ struct Row {
     autosave: bool,
     /// Scroll this lane to keep the sounding frame in view while the transport
     /// runs. On by default: a row of any length is wider than the window, so a
-    /// lane that does not follow shows the first few seconds of the composition
+    /// lane that does not follow shows the first few seconds of the sequence
     /// and nothing of the rest. Off pins the lane where the user left it, which
     /// is what you want while editing one part of a long row as it plays.
     autoscroll: bool,
     /// The source a loaded project asked for and the app could not find. Kept
     /// whole, not just as a message, so saving the project again preserves the
-    /// reference rather than quietly replacing it with "no track" — a save after
+    /// reference rather than quietly replacing it with "no instrument" — a save after
     /// a load must not be the thing that loses the file name.
     ///
-    /// A row in this state is **not** auto-adopted onto another track by
-    /// [`ComposerPanel::reconcile_tracks`]: the point is that the user is told
+    /// A row in this state is **not** auto-adopted onto another instrument by
+    /// [`SequencerPanel::reconcile_instruments`]: the point is that the user is told
     /// what is missing and picks the replacement.
-    missing: Option<project::TrackSource>,
+    missing: Option<project::InstrumentSource>,
     /// In play order: item `n` starts where item `n - 1`'s space ended.
     items: Vec<Item>,
     next_item_id: u64,
@@ -603,7 +603,7 @@ struct Row {
 }
 
 impl Row {
-    fn new(id: u64, track_id: Option<u64>) -> Self {
+    fn new(id: u64, instrument_id: Option<u64>) -> Self {
         // Named before it is anything else. A UUID says nothing about the row,
         // which is the point: it is a name that is already there to be replaced,
         // rather than a "Row 3" that goes on meaning row 3 after two rows above
@@ -613,7 +613,7 @@ impl Row {
             id,
             name: name.clone(),
             name_edit: name,
-            track_id,
+            instrument_id,
             gain: 1.0,
             lead: Duration::new(0, Fraction::None),
             enabled: true,
@@ -867,7 +867,7 @@ impl Row {
 }
 
 /// A **block**: the frames selected across the rows, resolved against the
-/// composition.
+/// sequence.
 ///
 /// A block is not a rectangle of notes — rows hold different numbers of frames
 /// of different lengths, and nothing lines up across them by position. What
@@ -885,7 +885,7 @@ struct Block {
 }
 
 struct BlockRow {
-    /// Where the row is in [`ComposerPanel::rows`].
+    /// Where the row is in [`SequencerPanel::rows`].
     idx: usize,
     /// First and last selected item on it, inclusive.
     first: usize,
@@ -904,7 +904,7 @@ impl Block {
     }
 }
 
-/// A block lifted out of the composition and held for putting back — the
+/// A block lifted out of the sequence and held for putting back — the
 /// clipboard.
 ///
 /// It keeps each row's frames *and* the silence in front of them (`lead`), so
@@ -920,8 +920,8 @@ struct Clip {
 #[derive(Clone)]
 struct ClipRow {
     /// The row this came off, which is the row it goes back on. A block is
-    /// copied *between times*, not between tracks: the frames carry pitches and
-    /// file starts that mean what they mean on the track they were written for.
+    /// copied *between times*, not between instruments: the frames carry pitches and
+    /// file starts that mean what they mean on the instrument they were written for.
     row_id: u64,
     /// Units between the window's start and this row's first copied note.
     lead: i64,
@@ -962,28 +962,28 @@ fn spacer(id: u64, pitch: u8, space: Duration) -> Item {
     Item { id, pitch, start: 0.0, dur: Duration::new(0, Fraction::None), space }
 }
 
-/// What the Composer wants the app to do with the project. The panel owns the
-/// composition but not the plugin instances a save has to read the grids from,
-/// nor the Tracks panel a load has to put them into, so the button records the
-/// intent and [`ComposerPanel::take_request`] hands it over.
+/// What the Sequencer wants the app to do with the project. The panel owns the
+/// sequence but not the plugin instances a save has to read the grids from,
+/// nor the Instruments panel a load has to put them into, so the button records the
+/// intent and [`SequencerPanel::take_request`] hands it over.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ProjectRequest {
     /// Write the project to `dir`, creating it if needed.
     Save { dir: PathBuf, name: String },
-    /// Read the manifest at this path and replace the composition with it.
+    /// Read the manifest at this path and replace the sequence with it.
     Load { file: PathBuf },
 }
 
 /// What the running transport has been told, so the panel can tell whether the
 /// user has changed anything since.
 struct LiveSnapshot {
-    /// `(row id, track id)` per playing row — the part a live edit *cannot*
-    /// change, because a different track means a different plugin to load.
+    /// `(row id, instrument id)` per playing row — the part a live edit *cannot*
+    /// change, because a different instrument means a different plugin to load.
     shape: Vec<(u64, Option<u64>)>,
     /// The part it can: notes and gain, per row.
     rows: Vec<RowEdit>,
     /// The stretch a repeat runs over — both ends, because either can be moved
-    /// by an edit: the boxes name lengths off a composition that is itself
+    /// by an edit: the boxes name lengths off a sequence that is itself
     /// being written.
     span: LoopSpan,
     /// Whether the user has already been told that the shape changed, so the
@@ -994,7 +994,7 @@ struct LiveSnapshot {
 /// A take in progress: where the keyboard's messages are piling up, and what
 /// they are timed against.
 ///
-/// Nothing is written into the composition until it ends. A row is a chain of
+/// Nothing is written into the sequence until it ends. A row is a chain of
 /// lengths, so a note's frame cannot be built before the note after it is known
 /// — and half a note appearing in a row while the user is still playing would
 /// be a distraction, not feedback.
@@ -1004,16 +1004,16 @@ struct Recording {
     /// recording must not take notes away from the instrument the user is
     /// listening to while they play.
     tap: MidiTap,
-    /// The clock for a take with no transport behind it (an empty composition
+    /// The clock for a take with no transport behind it (an empty sequence
     /// has nothing to play, so there is no stream to ask). With one, the
-    /// transport's own [`CompositionPlayer::heard_secs_at`] is used instead, so
+    /// transport's own [`SequencePlayer::heard_secs_at`] is used instead, so
     /// what was played lines up with what was heard.
     origin: Instant,
 }
 
-/// The Composer panel.
-pub struct ComposerPanel {
-    registry: TrackRegistry,
+/// The Sequencer panel.
+pub struct SequencerPanel {
+    registry: InstrumentRegistry,
     rows: Vec<Row>,
     next_row_id: u64,
     tempo_bpm: f32,
@@ -1026,15 +1026,15 @@ pub struct ComposerPanel {
     /// instances the grids have to be exported from.
     request: Option<ProjectRequest>,
     status: String,
-    player: Option<CompositionPlayer>,
+    player: Option<SequencePlayer>,
     /// A Play that has been pressed but has not made a sound yet: the rows are
     /// loading their plugins on a thread of their own.
-    preparing: Option<Receiver<Result<PreparedComposition, String>>>,
-    /// Loop the composition instead of stopping at the end. Shared with the
+    preparing: Option<Receiver<Result<PreparedSequence, String>>>,
+    /// Loop the sequence instead of stopping at the end. Shared with the
     /// transport's audio callback, so the checkbox works on a running player.
     repeat: Arc<AtomicBool>,
     /// Where a repeat starts and where it stops, both as a length **from the
-    /// beginning of the composition**, in the same three select boxes every
+    /// beginning of the sequence**, in the same three select boxes every
     /// other length in the panel is named by.
     ///
     /// Lengths rather than positions because that is the only vocabulary the
@@ -1046,17 +1046,17 @@ pub struct ComposerPanel {
     /// start beside it.
     ///
     /// A stop of zero is the box untouched, and means the end of the
-    /// composition — a repeat that stops before it starts is not a thing to
+    /// sequence — a repeat that stops before it starts is not a thing to
     /// have, so zero is free to mean the useful thing. See
     /// [`Self::repeat_to_units`].
     repeat_from: Duration,
     repeat_to: Duration,
-    /// The composition as the looping transport last received it. What an edit
+    /// The sequence as the looping transport last received it. What an edit
     /// is compared against, so an untouched frame publishes nothing.
     live_sent: Option<LiveSnapshot>,
     /// A running WAV export, which renders on its own thread and sends back the
     /// line to show when it is done. The GUI must not block on it: a long
-    /// composition takes seconds, and a frozen window looks like a crash.
+    /// sequence takes seconds, and a frozen window looks like a crash.
     export: Option<Receiver<String>>,
     /// Where a recording gets its own copy of the keyboard from.
     midi_taps: MidiTaps,
@@ -1064,9 +1064,9 @@ pub struct ComposerPanel {
     recording: Option<Recording>,
     /// The note value a take is rounded onto, in units.
     round_units: i64,
-    /// The track a recorded row plays. `None` falls back to the first track
+    /// The instrument a recorded row plays. `None` falls back to the first instrument
     /// there is, which is what an empty registry and a fresh panel both mean.
-    record_track: Option<u64>,
+    record_instrument: Option<u64>,
     /// The last block copied, ready to be pasted. Not saved with the project: a
     /// clipboard is part of an editing session, not of the music.
     clip: Option<Clip>,
@@ -1075,13 +1075,13 @@ pub struct ComposerPanel {
     /// difference between writing the arrangement and typing it.
     clone_times: u8,
     /// The name to give the next row, as typed into the box beside either Add
-    /// Track Row button. Empty — which is how it starts and how it is left
+    /// Instrument Row button. Empty — which is how it starts and how it is left
     /// behind every row that takes it — means the row is named after a UUID.
     new_row_name: String,
 }
 
-impl ComposerPanel {
-    pub fn new(registry: TrackRegistry, midi_taps: MidiTaps) -> Self {
+impl SequencerPanel {
+    pub fn new(registry: InstrumentRegistry, midi_taps: MidiTaps) -> Self {
         Self {
             registry,
             rows: Vec::new(),
@@ -1090,7 +1090,7 @@ impl ComposerPanel {
             project_name: "Untitled".to_string(),
             project_dir: None,
             request: None,
-            status: "Add a track row to start composing.".to_string(),
+            status: "Add an instrument row to start sequencing.".to_string(),
             player: None,
             preparing: None,
             repeat: Arc::new(AtomicBool::new(false)),
@@ -1101,7 +1101,7 @@ impl ComposerPanel {
             midi_taps,
             recording: None,
             round_units: record::DEFAULT_ROUND_UNITS,
-            record_track: None,
+            record_instrument: None,
             clip: None,
             clone_times: 1,
             new_row_name: String::new(),
@@ -1118,15 +1118,15 @@ impl ComposerPanel {
     }
 
     /// A new lane at `at` — the top button puts one in front of the list, the
-    /// bottom one behind it. Nothing else in the composition is addressed by
+    /// bottom one behind it. Nothing else in the sequence is addressed by
     /// row position: a clip remembers the row **id** it came off, and a block
     /// is worked out afresh each frame, so the order is the user's to arrange.
     fn add_row_at(&mut self, at: usize) {
         let at = at.min(self.rows.len());
         let id = self.next_row_id;
         self.next_row_id += 1;
-        let track = self.registry.first_id();
-        let mut row = Row::new(id, track);
+        let instrument = self.registry.first_id();
+        let mut row = Row::new(id, instrument);
         // The box beside the button names the row that button makes, and is
         // emptied behind it: a name is typed for the row it was typed for, and
         // the row after it goes back to a UUID rather than quietly becoming a
@@ -1137,48 +1137,48 @@ impl ComposerPanel {
         }
         let label = row.label();
         self.rows.insert(at, row);
-        self.status = match track.and_then(|t| self.registry.name_of(t)) {
+        self.status = match instrument.and_then(|t| self.registry.name_of(t)) {
             Some(name) => format!("Added row {label}, playing {name}."),
-            None => format!("Added row {label} — no tracks exist yet to assign it to."),
+            None => format!("Added row {label} — no instruments exist yet to assign it to."),
         };
     }
 
-    /// Keep every row pointed at a track that still exists: a row whose track was
+    /// Keep every row pointed at an instrument that still exists: a row whose instrument was
     /// removed falls back to the first one available, and a row left without any
-    /// (the registry went empty) adopts the first track added afterwards.
+    /// (the registry went empty) adopts the first instrument added afterwards.
     ///
     /// A row whose loaded source went **missing** is left alone. Quietly moving
-    /// it onto some other track would hide the one thing the user has to be told
+    /// it onto some other instrument would hide the one thing the user has to be told
     /// about, and would make the replacement look like it had always been there.
-    fn reconcile_tracks(&mut self) {
+    fn reconcile_instruments(&mut self) {
         let first = self.registry.first_id();
         for row in &mut self.rows {
             if row.missing.is_some() {
                 continue;
             }
-            let valid = row.track_id.is_some_and(|id| self.registry.contains(id));
+            let valid = row.instrument_id.is_some_and(|id| self.registry.contains(id));
             if !valid {
-                row.track_id = first;
+                row.instrument_id = first;
             }
         }
-        if !self.record_track.is_some_and(|id| self.registry.contains(id)) {
-            self.record_track = first;
+        if !self.record_instrument.is_some_and(|id| self.registry.contains(id)) {
+            self.record_instrument = first;
         }
     }
 
-    /// End of the composition in units — the longest row.
+    /// End of the sequence in units — the longest row.
     fn end_units(&self) -> i64 {
         self.rows.iter().map(Row::end_units).max().unwrap_or(0)
     }
 
     /// Where the stop box lands, in units from the beginning: what it says,
-    /// held inside the composition — and the *end* of the composition when it
+    /// held inside the sequence — and the *end* of the sequence when it
     /// says nothing.
     ///
     /// Zero has to mean something, and "stop at the beginning" is not a thing
     /// anyone wants: a repeat that stops where it starts has nothing in it. So
     /// an untouched box means the end, which is both the useful reading and the
-    /// one that leaves a fresh panel looping the whole composition, as it always
+    /// one that leaves a fresh panel looping the whole sequence, as it always
     /// has. A stop asked for past the end is held at the end for the same
     /// reason a start is: there is no music out there to repeat, only silence
     /// the loop would sit in.
@@ -1191,13 +1191,13 @@ impl ComposerPanel {
     }
 
     /// The stretch a repeat loops over, in units — start included, end
-    /// excluded. Both ends are read off the composition as it stands now, so a
+    /// excluded. Both ends are read off the sequence as it stands now, so a
     /// window follows it as it is written.
     ///
     /// The two boxes are free to ask for nothing: a start on or past the stop,
     /// either way round. That is not a short loop — a window of no length is a
     /// transport with no samples to play — so it is answered with the whole
-    /// composition, which is what a repeat did before there were boxes to ask
+    /// sequence, which is what a repeat did before there were boxes to ask
     /// with, and [`Self::repeat_span_ignored`] is what says so on screen.
     fn repeat_span_units(&self) -> (i64, i64) {
         let (from, to) = (self.repeat_from.units(), self.repeat_to_units());
@@ -1227,7 +1227,7 @@ impl ComposerPanel {
     //
     // A block is a stretch of frames selected across any number of rows at
     // once, and the reason it exists is that music repeats: a chorus, a bar of
-    // drums, a two-bar figure played by three tracks together. Written frame by
+    // drums, a two-bar figure played by three instruments together. Written frame by
     // frame, the second time round costs as much as the first, and the copy
     // drifts out of step with the original the moment one row is a 1/16 short.
     // Copying whole blocks makes the repeat one press, and pins the alignment
@@ -1249,7 +1249,7 @@ impl ComposerPanel {
         (!rows.is_empty()).then_some(Block { rows, from, to })
     }
 
-    /// Select every frame in every row — the whole composition as one block.
+    /// Select every frame in every row — the whole sequence as one block.
     fn select_all(&mut self) {
         let mut rows = 0;
         for row in &mut self.rows {
@@ -1279,7 +1279,7 @@ impl ComposerPanel {
     ///
     /// This is what makes a natural block one press. Mark a phrase on the row
     /// you can hear it in — the melody, the drums — and the same stretch of the
-    /// arrangement, on every other track, comes with it. What the ear calls a
+    /// arrangement, on every other instrument, comes with it. What the ear calls a
     /// section is a stretch of time, not a count of frames, and no two rows
     /// spend it on the same number of notes.
     ///
@@ -1311,7 +1311,7 @@ impl ComposerPanel {
             format!("Block spans {rows} row(s), {frames} frame(s) — {} of music.", span_label(to - from));
     }
 
-    /// The one frame selected in the whole composition, as the row it is on and
+    /// The one frame selected in the whole sequence, as the row it is on and
     /// its position on that row. `None` unless exactly one frame is selected
     /// anywhere — a block of two says nothing about which one is meant.
     fn single_selected(&self) -> Option<(usize, usize)> {
@@ -1431,7 +1431,7 @@ impl ComposerPanel {
         self.clip = Some(clip);
     }
 
-    /// Put the clipboard back at the end of the composition, on the rows it came
+    /// Put the clipboard back at the end of the sequence, on the rows it came
     /// from and all of them at once.
     ///
     /// The paste point is the end of the **longest** row, not of each row: rows
@@ -1442,7 +1442,7 @@ impl ComposerPanel {
     ///
     /// A row that has since been removed is reported rather than guessed at: the
     /// frames on it name a pitch, a length and a place in a file that mean what
-    /// they mean on the track they were written for.
+    /// they mean on the instrument they were written for.
     fn paste_block(&mut self) {
         let Some(clip) = self.clip.clone() else {
             self.status = "Nothing copied yet — select a block and press Copy.".to_string();
@@ -1488,7 +1488,7 @@ impl ComposerPanel {
             frames += crow.items.len();
         }
         self.status = match gone {
-            0 => format!("Pasted {frames} frame(s) onto {rows} row(s) at the end of the composition."),
+            0 => format!("Pasted {frames} frame(s) onto {rows} row(s) at the end of the sequence."),
             n => format!(
                 "Pasted {frames} frame(s) onto {rows} row(s) — {n} row(s) the block was \
                  copied from are gone."
@@ -1561,9 +1561,9 @@ impl ComposerPanel {
     }
 
     /// Every row that has something to play, resolved to seconds. A row with no
-    /// notes, with no track behind it, or switched off, simply is not in the
-    /// composition — a disabled row costs no plugin instance either, which is
-    /// what makes muting a heavy track worth doing.
+    /// notes, with no instrument behind it, or switched off, simply is not in the
+    /// sequence — a disabled row costs no plugin instance either, which is
+    /// what makes muting a heavy instrument worth doing.
     fn build_plans(&self) -> Vec<RowPlan> {
         let spu = self.secs_per_unit();
         let mut plans = Vec::new();
@@ -1571,7 +1571,7 @@ impl ComposerPanel {
             if !row.enabled {
                 continue;
             }
-            let Some(source) = row.track_id.and_then(|id| self.registry.playback_source(id)) else {
+            let Some(source) = row.instrument_id.and_then(|id| self.registry.playback_source(id)) else {
                 continue;
             };
             let notes = row.planned_notes(spu);
@@ -1595,10 +1595,10 @@ impl ComposerPanel {
         let spu = self.secs_per_unit();
         self.rows
             .iter()
-            .any(|row| row.enabled && row.track_id.is_some() && !row.planned_notes(spu).is_empty())
+            .any(|row| row.enabled && row.instrument_id.is_some() && !row.planned_notes(spu).is_empty())
     }
 
-    /// The composition as the transport would need it *now*. Cheap by design:
+    /// The sequence as the transport would need it *now*. Cheap by design:
     /// it resolves note times and reads row gains, and deliberately does not
     /// touch the registry — asking that for a playback source exports a
     /// LeSynth's live grid, which is far too much work for a per-frame check.
@@ -1607,20 +1607,20 @@ impl ComposerPanel {
         let mut shape = Vec::new();
         let mut rows = Vec::new();
         for row in &self.rows {
-            // Same filter as `build_plans`: a row with no track, no notes, or
-            // switched off is not in the composition, so it is not in the
+            // Same filter as `build_plans`: a row with no instrument, no notes, or
+            // switched off is not in the sequence, so it is not in the
             // transport either. Switching one off while a repeat runs therefore
             // changes the *shape*, and is reported rather than applied — the
             // row's voice is a loaded plugin, and dropping it is not something
             // the audio thread can be asked to do mid-loop.
-            if !row.enabled || row.track_id.is_none() {
+            if !row.enabled || row.instrument_id.is_none() {
                 continue;
             }
             let notes = row.planned_notes(spu);
             if notes.is_empty() {
                 continue;
             }
-            shape.push((row.id, row.track_id));
+            shape.push((row.id, row.instrument_id));
             rows.push(RowEdit {
                 row_id: row.id,
                 gain: row.gain,
@@ -1639,7 +1639,7 @@ impl ComposerPanel {
     /// changed since it last heard from us. Applied at the next loop point.
     ///
     /// Only notes, gains and the loop length travel this way. Adding a row, or
-    /// pointing one at another track, means a plugin to load — which cannot
+    /// pointing one at another instrument, means a plugin to load — which cannot
     /// happen on the audio thread — so that is reported rather than applied.
     fn push_live_edits(&mut self) {
         let Some(player) = &self.player else { return };
@@ -1651,7 +1651,7 @@ impl ComposerPanel {
         let snapshot = self.live_snapshot();
         if snapshot.shape != sent.shape {
             if !sent.shape_warned {
-                self.status = "Rows or their tracks changed — press Play again to \
+                self.status = "Rows or their instruments changed — press Play again to \
                                hear them; note edits still follow the loop."
                     .to_string();
                 if let Some(sent) = &mut self.live_sent {
@@ -1680,7 +1680,7 @@ impl ComposerPanel {
     ///
     /// Loading is not quick — one plugin instance per row, and a plugin can take
     /// a second — so doing it here would freeze the window for as long as it
-    /// takes, which is what makes a transport feel broken. The composition is
+    /// takes, which is what makes a transport feel broken. The sequence is
     /// snapshotted now, so what plays is what was on screen when the button went
     /// down, however long the loading takes.
     fn start_playback(&mut self, ctx: &egui::Context) {
@@ -1700,7 +1700,7 @@ impl ComposerPanel {
         // nothing.
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(CompositionPlayer::prepare(plans).map_err(|e| format!("{e:#}")));
+            let _ = tx.send(SequencePlayer::prepare(plans).map_err(|e| format!("{e:#}")));
             ctx.request_repaint();
         });
         self.preparing = Some(rx);
@@ -1725,7 +1725,7 @@ impl ComposerPanel {
             Err(e) => {
                 self.status = format!("Playback failed: {e}");
                 self.live_sent = None;
-                // A take with no backing track and no clock to place it on is
+                // A take with no backing instrument and no clock to place it on is
                 // not a take. Abandoning it here is better than recording
                 // against a silence the user was not expecting.
                 self.recording = None;
@@ -1737,11 +1737,11 @@ impl ComposerPanel {
         // The length may have been edited while the rows were loading; the loop
         // follows what is on screen now, as a live edit would.
         let span = self.repeat_span();
-        match CompositionPlayer::start_prepared(prepared, span, self.repeat.clone()) {
+        match SequencePlayer::start_prepared(prepared, span, self.repeat.clone()) {
             Ok(player) => {
                 // Say when rows are sharing: it explains both the memory and why
                 // one of them cannot be given its own level while it plays.
-                // Only when there are instances to share — a composition of wav
+                // Only when there are instances to share — a sequence of wav
                 // rows loads none, and "on 0 shared instance(s)" is not news.
                 let shared = match instances > 0 && instances < loaded {
                     true => format!(" on {instances} shared instance(s)"),
@@ -1759,7 +1759,7 @@ impl ComposerPanel {
                     // The take starts where the sound does. Loading the rows
                     // took as long as it took, and anything played into the tap
                     // meanwhile was played against nothing — the transport's own
-                    // clock ([`CompositionPlayer::heard_secs_at`]) takes over
+                    // clock ([`SequencePlayer::heard_secs_at`]) takes over
                     // from here, and it starts at this moment.
                     if let Ok(mut tapped) = rec.tap.lock() {
                         tapped.clear();
@@ -1776,11 +1776,11 @@ impl ComposerPanel {
         }
     }
 
-    /// Press Record: play the composition through exactly once, and keep
+    /// Press Record: play the sequence through exactly once, and keep
     /// everything the MIDI keyboard sends while it does.
     ///
-    /// Nothing is written into the composition until the pass ends
-    /// ([`Self::finish_recording`]). A composition with nothing in it yet still
+    /// Nothing is written into the sequence until the pass ends
+    /// ([`Self::finish_recording`]). A sequence with nothing in it yet still
     /// records — there is simply no transport behind the take, and it runs from
     /// the button press until Stop.
     fn start_recording(&mut self, ctx: &egui::Context) {
@@ -1806,7 +1806,7 @@ impl ComposerPanel {
         }
     }
 
-    /// End a take and append what was played to the composition, rounded onto
+    /// End a take and append what was played to the sequence, rounded onto
     /// the chosen note value.
     ///
     /// Returns the line to show, which the caller puts up *after* whatever
@@ -1842,11 +1842,11 @@ impl ComposerPanel {
         let grid = self.round_units;
         let quantized = record::quantize(&notes, self.secs_per_unit(), grid);
         let voices = record::split_voices(&quantized);
-        let track = self.record_track.or_else(|| self.registry.first_id());
+        let instrument = self.record_instrument.or_else(|| self.registry.first_id());
         for voice in &voices {
             let id = self.next_row_id;
             self.next_row_id += 1;
-            let mut row = Row::new(id, track);
+            let mut row = Row::new(id, instrument);
             let (lead, items) = record::voice_items(voice, &mut row.next_item_id);
             row.lead = lead;
             row.items = items;
@@ -1856,12 +1856,12 @@ impl ComposerPanel {
         let played = notes.len();
         let rows = voices.len();
         let grid = record::round_label(grid);
-        Some(match (track, rows) {
-            // A take with no track behind it is still worth keeping: the rows
+        Some(match (instrument, rows) {
+            // A take with no instrument behind it is still worth keeping: the rows
             // are there, and the select box on each is how they get a sound.
             (None, _) => format!(
                 "Recorded {played} note(s) into {rows} new row(s), rounded to {grid} — \
-                 no tracks exist yet, so pick one on each row."
+                 no instruments exist yet, so pick one on each row."
             ),
             (Some(_), 1) => format!("Recorded {played} note(s) into a new row, rounded to {grid}."),
             // More rows than one means notes sounded together: a row plays one
@@ -1874,7 +1874,7 @@ impl ComposerPanel {
         })
     }
 
-    /// Render the whole composition offline and write it as a `.wav`.
+    /// Render the whole sequence offline and write it as a `.wav`.
     ///
     /// The render runs on its own thread — it loads its own plugin instances and
     /// works faster than real time, but "faster than real time" is still seconds
@@ -1888,7 +1888,7 @@ impl ComposerPanel {
         }
         let stem = project::sanitize_name(&self.project_name);
         let mut dialog = rfd::FileDialog::new()
-            .set_title("Export the track composition as WAV")
+            .set_title("Export the sequence as WAV")
             .add_filter("WAV audio", &["wav"])
             .set_file_name(format!("{stem}.wav"));
         if let Some(dir) = &self.project_dir {
@@ -1937,7 +1937,7 @@ impl ComposerPanel {
 
     /// The optional name for the next row, beside the button that makes it.
     ///
-    /// Both Add Track Row buttons are served by the same box: there is one name
+    /// Both Add Instrument Row buttons are served by the same box: there is one name
     /// being typed at a time, whichever end of the list the row is going on, so
     /// a name typed at the bottom is still there if the row is added at the top.
     /// `salt` only keeps the two boxes' widget state apart.
@@ -1994,14 +1994,14 @@ impl ComposerPanel {
     }
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
-        self.reconcile_tracks();
-        // A finished composition stops itself, so the transport does not sit on
+        self.reconcile_instruments();
+        // A finished sequence stops itself, so the transport does not sit on
         // "playing" over silence.
         // A Play whose rows have finished loading starts here, so the button
         // press and the first sound are separate frames and the window never
         // stops painting between them.
         self.poll_preparation();
-        if self.player.as_ref().is_some_and(CompositionPlayer::is_finished) {
+        if self.player.as_ref().is_some_and(SequencePlayer::is_finished) {
             // Before the player goes: a take is placed on the transport's clock.
             let recorded = self.finish_recording();
             self.player = None;
@@ -2027,12 +2027,12 @@ impl ComposerPanel {
             }
         }
 
-        let tracks = self.registry.list();
+        let instruments = self.registry.list();
 
         ui.horizontal_wrapped(|ui| {
             if ui
-                .button("➕ Add Track Row")
-                .on_hover_text("A new lane at the top of the list, playing the first available track")
+                .button("➕ Add Instrument Row")
+                .on_hover_text("A new lane at the top of the list, playing the first available instrument")
                 .clicked()
             {
                 self.add_row_at(0);
@@ -2051,7 +2051,7 @@ impl ComposerPanel {
                 .on_hover_text(
                     "Play every row.\n\nUnticked while any row is switched off; \
                      ticking it turns them all back on, and unticking it silences \
-                     the composition without touching a note of it.",
+                     the sequence without touching a note of it.",
                 )
                 .changed()
             {
@@ -2064,12 +2064,12 @@ impl ComposerPanel {
                     "Every row switched off — nothing will play.".to_string()
                 };
             }
-            if tracks.is_empty() {
+            if instruments.is_empty() {
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(
-                        "No tracks yet — create one under Tracks, or publish a subtrack \
-                         from Resynthesis with “Add as Track”.",
+                        "No instruments yet — create one under Instruments, or publish a subtrack \
+                         from Resynthesis with “Add as Instrument”.",
                     )
                     .color(egui::Color32::from_rgb(220, 180, 120)),
                 );
@@ -2082,17 +2082,17 @@ impl ComposerPanel {
             ui.add_space(6.0);
             self.block_ui(ui);
             ui.add_space(4.0);
-            self.lanes_ui(ui, &tracks);
-            // The same button again, where the list ends: a composition is
+            self.lanes_ui(ui, &instruments);
+            // The same button again, where the list ends: a sequence is
             // built downwards, and reaching back to the top to add the next
             // lane — then dragging nothing, since rows do not move — is the
             // long way round.
             ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
                 if ui
-                    .button("➕ Add Track Row")
+                    .button("➕ Add Instrument Row")
                     .on_hover_text(
-                        "A new lane at the end of the list, playing the first available track",
+                        "A new lane at the end of the list, playing the first available instrument",
                     )
                     .clicked()
                 {
@@ -2113,14 +2113,14 @@ impl ComposerPanel {
         self.request.take()
     }
 
-    /// The composition as it would be saved. `source_of` maps a row's registry
+    /// The sequence as it would be saved. `source_of` maps a row's registry
     /// id onto the source to record for it, which only the app can decide: it
-    /// knows which tracks are LeSynth, where their grids went, and where a
+    /// knows which instruments are LeSynth, where their grids went, and where a
     /// custom VST was loaded from.
     pub fn to_project(
         &self,
         name: &str,
-        mut source_of: impl FnMut(Option<u64>) -> project::TrackSource,
+        mut source_of: impl FnMut(Option<u64>) -> project::InstrumentSource,
     ) -> project::Project {
         project::Project {
             name: name.to_string(),
@@ -2132,16 +2132,16 @@ impl ComposerPanel {
                 .iter()
                 .map(|row| project::ProjectRow {
                     name: row.name.clone(),
-                    track_name: row
-                        .track_id
+                    instrument_name: row
+                        .instrument_id
                         .and_then(|id| self.registry.name_of(id))
                         .or_else(|| row.missing.as_ref().map(|s| s.describe()))
                         .unwrap_or_default(),
                     // An unresolved row round-trips the source it was looking
-                    // for; anything else asks the app what its track is now.
+                    // for; anything else asks the app what its instrument is now.
                     source: match &row.missing {
                         Some(src) => src.clone(),
-                        None => source_of(row.track_id),
+                        None => source_of(row.instrument_id),
                     },
                     gain: row.gain,
                     lead: row.lead,
@@ -2154,7 +2154,7 @@ impl ComposerPanel {
         }
     }
 
-    /// Replace the composition with a loaded project. `resolved` is one entry
+    /// Replace the sequence with a loaded project. `resolved` is one entry
     /// per row, in order: the registry id the app managed to bind that row's
     /// source to, or `None` if it could not be found.
     pub fn apply_project(
@@ -2173,8 +2173,8 @@ impl ComposerPanel {
         for (i, prow) in project.rows.iter().enumerate() {
             let id = self.next_row_id;
             self.next_row_id += 1;
-            let track_id = resolved.get(i).copied().flatten();
-            let mut row = Row::new(id, track_id);
+            let instrument_id = resolved.get(i).copied().flatten();
+            let mut row = Row::new(id, instrument_id);
             // A project written before rows had names leaves this empty, and the
             // row keeps the UUID it was just given: unnamed rows are named, not
             // left blank, however old the file they came out of.
@@ -2188,8 +2188,8 @@ impl ComposerPanel {
             row.autoscroll = prow.autoscroll;
             // Nothing to bind means the source is gone. Keep what it was so the
             // row can say so and the user knows what to replace.
-            row.missing = match (track_id, &prow.source) {
-                (None, project::TrackSource::None) => None,
+            row.missing = match (instrument_id, &prow.source) {
+                (None, project::InstrumentSource::None) => None,
                 (None, src) => Some(src.clone()),
                 (Some(_), _) => None,
             };
@@ -2213,11 +2213,11 @@ impl ComposerPanel {
     }
 
     /// Which rows want their grid re-exported on the next save, as registry ids.
-    pub fn autosave_track_ids(&self) -> Vec<u64> {
+    pub fn autosave_instrument_ids(&self) -> Vec<u64> {
         self.rows
             .iter()
             .filter(|r| r.autosave)
-            .filter_map(|r| r.track_id)
+            .filter_map(|r| r.instrument_id)
             .collect()
     }
 
@@ -2254,7 +2254,7 @@ impl ComposerPanel {
                 .button("💾 Save Project")
                 .on_hover_text(format!(
                     "Write {stem}/{stem}.{ext}, with a .lsft beside it for every \
-                     LeSynth Fourier track a row plays.\n\nShortcut: Ctrl+S.",
+                     LeSynth Fourier instrument a row plays.\n\nShortcut: Ctrl+S.",
                     ext = project::EXTENSION
                 ))
                 .clicked()
@@ -2388,7 +2388,7 @@ impl ComposerPanel {
                         .on_hover_text(
                             "Take the same stretch of time out of every row.\n\n\
                              Mark a phrase on the row you can hear it in and press this: \
-                             every note that begins inside it, on every other track, \
+                             every note that begins inside it, on every other instrument, \
                              joins the block. A section is a stretch of time, not a count \
                              of frames — no two rows spend it on the same number of notes.",
                         )
@@ -2417,7 +2417,7 @@ impl ComposerPanel {
                     if ui
                         .add_enabled(clip.is_some(), egui::Button::new("📋 Paste at End"))
                         .on_hover_text(
-                            "Put the copied block back at the end of the composition, on \
+                            "Put the copied block back at the end of the sequence, on \
                              the rows it came from and all of them at once.\n\n\
                              Every row is padded up to the end of the longest one, so a \
                              block that sounded together is pasted sounding together.",
@@ -2434,7 +2434,7 @@ impl ComposerPanel {
                              last, on every row at once, with everything that followed \
                              moved along by the same amount on every row.\n\n\
                              A copy takes exactly as long as the block's window, so the \
-                             tracks stay in step however many times it is pressed. The \
+                             instruments stay in step however many times it is pressed. The \
                              selection moves onto the copy, so pressing it again repeats \
                              the repeat.",
                         )
@@ -2480,7 +2480,7 @@ impl ComposerPanel {
         }
     }
 
-    fn lanes_ui(&mut self, ui: &mut egui::Ui, tracks: &[(u64, String)]) {
+    fn lanes_ui(&mut self, ui: &mut egui::Ui, instruments: &[(u64, String)]) {
         let mut remove_row: Option<usize> = None;
         // Deferred like the removal, and for the same reason: the status line
         // belongs to the panel, and the rows are borrowed for the whole loop.
@@ -2500,11 +2500,11 @@ impl ComposerPanel {
         // a stretch of a recording into a length.
         let spu = self.secs_per_unit();
         // Resolved before the loop: `self.rows` is borrowed mutably inside it,
-        // and the registry is what knows a drum track from an instrument.
+        // and the registry is what knows a drum instrument from an instrument.
         let percussion: Vec<bool> = self
             .rows
             .iter()
-            .map(|r| r.track_id.is_some_and(|id| self.registry.is_percussion(id)))
+            .map(|r| r.instrument_id.is_some_and(|id| self.registry.is_percussion(id)))
             .collect();
         // And which rows play an audio file rather than an instrument — with how
         // long that file runs, which is the range of the start slider on its
@@ -2512,7 +2512,7 @@ impl ComposerPanel {
         let wav: Vec<Option<f32>> = self
             .rows
             .iter()
-            .map(|r| r.track_id.and_then(|id| self.registry.wav_secs(id)))
+            .map(|r| r.instrument_id.and_then(|id| self.registry.wav_secs(id)))
             .collect();
 
         for (idx, row) in self.rows.iter_mut().enumerate() {
@@ -2608,25 +2608,25 @@ impl ComposerPanel {
                                         // says so in the box itself, and says
                                         // what it was: picking anything from the
                                         // list is how it gets repaired.
-                                        let label = match (&row.missing, row.track_id) {
+                                        let label = match (&row.missing, row.instrument_id) {
                                             (Some(want), _) => {
                                                 format!("⚠ missing: {}", want.describe())
                                             }
-                                            (None, Some(id)) => tracks
+                                            (None, Some(id)) => instruments
                                                 .iter()
                                                 .find(|(t, _)| *t == id)
                                                 .map(|(_, n)| n.clone())
-                                                .unwrap_or_else(|| "— no track —".to_string()),
-                                            (None, None) => "— no track —".to_string(),
+                                                .unwrap_or_else(|| "— no instrument —".to_string()),
+                                            (None, None) => "— no instrument —".to_string(),
                                         };
                                         // Salt = `row_id` (so two rows never
-                                        // share a popup) + the track count. An
+                                        // share a popup) + the instrument count. An
                                         // `egui::Area` measures itself only on
                                         // the first pass a given id is shown and
                                         // then caps the Ui, so the ScrollArea
                                         // clips the list and it measures the same
                                         // again — a box first opened with two
-                                        // tracks stayed two tall. A new count is
+                                        // instruments stayed two tall. A new count is
                                         // a new Area, measured afresh.
                                         //
                                         // Cut to the head's width: a source's
@@ -2640,24 +2640,24 @@ impl ComposerPanel {
                                         ui.allocate_ui(
                                             egui::vec2(combo_w, ui.spacing().interact_size.y),
                                             |ui| {
-                                        egui::ComboBox::from_id_salt(("track", row_id, tracks.len()))
+                                        egui::ComboBox::from_id_salt(("instrument", row_id, instruments.len()))
                                             .width(combo_w)
                                             .truncate()
                                             .selected_text(label)
                                             .show_ui(ui, |ui| {
-                                                if tracks.is_empty() {
-                                                    ui.label("— no track —");
+                                                if instruments.is_empty() {
+                                                    ui.label("— no instrument —");
                                                 }
-                                                for (id, name) in tracks {
+                                                for (id, name) in instruments {
                                                     if ui
                                                         .selectable_label(
                                                             row.missing.is_none()
-                                                                && row.track_id == Some(*id),
+                                                                && row.instrument_id == Some(*id),
                                                             name,
                                                         )
                                                         .clicked()
                                                     {
-                                                        row.track_id = Some(*id);
+                                                        row.instrument_id = Some(*id);
                                                         // Repaired: the row is
                                                         // an ordinary row again.
                                                         row.missing = None;
@@ -2706,7 +2706,7 @@ impl ComposerPanel {
                                         )
                                         .on_hover_text(
                                             "How loud this row plays in the mix. 1.00 is \
-                                             the track's own level; above it the row is \
+                                             the instrument's own level; above it the row is \
                                              boosted, so a quiet drum can hold its own \
                                              against a loud lead.\n\nThe travel is \
                                              logarithmic, a fader rather than a ruler: \
@@ -2766,7 +2766,7 @@ impl ComposerPanel {
                                                  Off takes the row out of the transport \
                                                  and out of an exported wav, and leaves \
                                                  everything on it where it is: the \
-                                                 notes, the block, the track it plays. \
+                                                 notes, the block, the instrument it plays. \
                                                  That is how a part is listened to \
                                                  without the two rows drowning it, and \
                                                  how they come back afterwards.\n\n\
@@ -3191,7 +3191,7 @@ impl ComposerPanel {
                             // instrument: *what* is sounding here.
                             //
                             // A slider to find it by ear, and a value to set it
-                            // exactly: the track moves it in tens of
+                            // exactly: the instrument moves it in tens of
                             // milliseconds, which is the wrong side of a beat,
                             // and the number beside it can be dragged a
                             // millisecond at a time or typed outright.
@@ -3298,7 +3298,7 @@ impl ComposerPanel {
     }
 
     /// Where a repeat starts and where it stops — both a length from the
-    /// beginning of the composition.
+    /// beginning of the sequence.
     ///
     /// **Why lengths and not positions.** It is the only vocabulary the panel
     /// has: a row is a chain of lengths, nothing in it sits at a timestamp, and
@@ -3324,7 +3324,7 @@ impl ComposerPanel {
             ui.add_enabled_ui(!recording, |ui| {
                 ui.horizontal(|ui| {
                     ui.label("🔁 Repeat from").on_hover_text(
-                        "How far into the composition a repeat starts — a length \
+                        "How far into the sequence a repeat starts — a length \
                          from the beginning, in the same three boxes a note is \
                          written with.\n\nLeave it at zero to loop from the top. \
                          Play with Repeat ticked starts right here, the first \
@@ -3335,9 +3335,9 @@ impl ComposerPanel {
                     ui.add_space(8.0);
                     ui.label("to").on_hover_text(
                         "Where a repeat stops — also a length from the beginning \
-                         of the composition, so the two boxes can be read against \
+                         of the sequence, so the two boxes can be read against \
                          each other rather than off opposite ends.\n\nZero means \
-                         the end of the composition, which is what a repeat loops \
+                         the end of the sequence, which is what a repeat loops \
                          to until it is told otherwise; a stop past the end is \
                          held there, since out that far there is only silence to \
                          repeat. Releases ring on across the wrap either way.",
@@ -3348,7 +3348,7 @@ impl ComposerPanel {
 
             // What the two lengths actually came to, which is the whole reason
             // they are next to each other: a window is two boxes and a
-            // composition, and only this says what the three of them make.
+            // sequence, and only this says what the three of them make.
             ui.add_space(10.0);
             let spu = self.secs_per_unit();
             let (from, to) = self.repeat_span_units();
@@ -3364,7 +3364,7 @@ impl ComposerPanel {
                 .on_hover_text(
                     "The start is not in front of the stop: a window of no length \
                      is not a short loop, it is a transport with nothing to play. \
-                     The whole composition is looped until one of the two boxes \
+                     The whole sequence is looped until one of the two boxes \
                      leaves room for the other.",
                 );
             } else {
@@ -3381,7 +3381,7 @@ impl ComposerPanel {
                     .color(egui::Color32::from_gray(160)),
                 )
                 .on_hover_text(
-                    "Where the two lengths land in the composition as it stands \
+                    "Where the two lengths land in the sequence as it stands \
                      now. It follows the tempo, and a stop left at zero follows \
                      the music: write another bar and the loop reaches it.\n\n\
                      A window can be changed while a repeat is playing — like a \
@@ -3412,14 +3412,14 @@ impl ComposerPanel {
                     ),
                 )
                 .on_hover_text(
-                    "Play the composition through exactly once and record your MIDI \
+                    "Play the sequence through exactly once and record your MIDI \
                      keyboard over it.\n\nWhat you play is appended as new rows when the \
                      pass ends (or when you press Stop), with every note and every \
                      silence rounded onto the note value in “Round”. Notes that sound \
                      *together* go into a row each — a row plays one note at a time — \
                      so a chord comes out as a row per voice; a key merely let go of \
                      late stays in the line and is trimmed.\n\nTo hear yourself while \
-                     you play, open the track's editor: the keyboard feeds it as usual, \
+                     you play, open the instrument's editor: the keyboard feeds it as usual, \
                      and recording takes a copy rather than the events themselves.",
                 )
                 .clicked()
@@ -3435,7 +3435,7 @@ impl ComposerPanel {
                 self.stop_playback();
             }
             // Live: ticking this mid-play loops from the next pass (or straight
-            // away, if the composition is already into its release tail).
+            // away, if the sequence is already into its release tail).
             // Not during a take: "once" is the whole of what Record promises,
             // and a second pass would be recorded over the first.
             let mut repeat = self.repeat.load(Ordering::Relaxed);
@@ -3443,7 +3443,7 @@ impl ComposerPanel {
                 .add_enabled_ui(!recording, |ui| ui.checkbox(&mut repeat, "🔁 Repeat"))
                 .inner
                 .on_hover_text(
-                    "Play the composition over and over. By default the loop is \
+                    "Play the sequence over and over. By default the loop is \
                      the whole written length; the two lengths on the line below \
                      trim it at either end.\n\nReleases ring on across the loop, \
                      and it can be switched on and off while it plays — untick it \
@@ -3458,7 +3458,7 @@ impl ComposerPanel {
             if ui
                 .add_enabled(!exporting, egui::Button::new("🎵 Export WAV…"))
                 .on_hover_text(
-                    "Render the whole composition offline and write it as a \
+                    "Render the whole sequence offline and write it as a \
                      16-bit .wav — every row, mixed exactly as the transport \
                      plays it.\n\nThe render runs in the background; the panel \
                      stays usable.",
@@ -3505,18 +3505,18 @@ impl ComposerPanel {
                 );
             ui.label("into");
             let record_label = self
-                .record_track
+                .record_instrument
                 .and_then(|id| self.registry.name_of(id))
-                .unwrap_or_else(|| "— no track —".to_string());
-            egui::ComboBox::from_id_salt(("record_track", self.registry.list().len()))
+                .unwrap_or_else(|| "— no instrument —".to_string());
+            egui::ComboBox::from_id_salt(("record_instrument", self.registry.list().len()))
                 .width(150.0)
                 .selected_text(record_label)
                 .show_ui(ui, |ui| {
                     if self.registry.list().is_empty() {
-                        ui.label("— no track —");
+                        ui.label("— no instrument —");
                     }
                     for (id, name) in self.registry.list() {
-                        ui.selectable_value(&mut self.record_track, Some(id), name);
+                        ui.selectable_value(&mut self.record_instrument, Some(id), name);
                     }
                 })
                 .response
@@ -3547,7 +3547,7 @@ impl ComposerPanel {
                 Some(p) if self.repeat.load(Ordering::Relaxed) => {
                     // Both ends when the loop is a window, so the readout says
                     // what is being repeated rather than only how far through
-                    // the composition the playhead is.
+                    // the sequence the playhead is.
                     let (start, end) = (p.loop_start_secs(), p.loop_secs());
                     let of = if start > 0.0 {
                         format!("{start:.1} – {end:.1} s")
@@ -3601,13 +3601,13 @@ impl ComposerPanel {
 /// can write a dotted quarter into a row can write one into a repeat's start
 /// without learning a second way to say it. Only the layout differs — a card
 /// stacks them, a toolbar lays them out — which is why this is a function of
-/// its own rather than a call into [`ComposerPanel::frame_ui`]. The one
+/// its own rather than a call into [`SequencerPanel::frame_ui`]. The one
 /// difference is the whole-note count, which goes up to [`MAX_REPEAT_WHOLES`]
 /// here and so is typed or dragged rather than picked off a list.
 ///
 /// Change is reported by comparing the length rather than by asking the boxes:
 /// a combo answers `changed()` for the *button*, not for the popup (see the
-/// track select box above), and picking the value that was already there is not
+/// instrument select box above), and picking the value that was already there is not
 /// a change to anything but the widget.
 fn length_boxes(ui: &mut egui::Ui, salt: &'static str, dur: &mut Duration) -> bool {
     let before = *dur;
@@ -3667,9 +3667,9 @@ fn length_boxes(ui: &mut egui::Ui, salt: &'static str, dur: &mut Duration) -> bo
 const LEAD_SPACE_ID: u64 = u64::MAX;
 
 /// What drawing one frame reported back to its lane.
-/// Which of a row's three frames [`ComposerPanel::frame_ui`] is drawing.
+/// Which of a row's three frames [`SequencerPanel::frame_ui`] is drawing.
 ///
-/// A note carries a pitch, unless the row plays an audio file: a wav track has
+/// A note carries a pitch, unless the row plays an audio file: a wav instrument has
 /// the pitch it was recorded at, so its frames offer a length and nothing else.
 /// Both are the blue note frame, and both leave with their delete button; a
 /// space is the amber one, which has none.
@@ -3816,8 +3816,8 @@ mod tests {
 
     /// A panel of several rows, each with its own id — which is what a paste
     /// looks a row up by.
-    fn panel_with_rows(rows: &[&[(u8, Duration, Duration)]]) -> ComposerPanel {
-        let mut panel = ComposerPanel::new(TrackRegistry::default(), crate::midi::new_midi_taps());
+    fn panel_with_rows(rows: &[&[(u8, Duration, Duration)]]) -> SequencerPanel {
+        let mut panel = SequencerPanel::new(InstrumentRegistry::default(), crate::midi::new_midi_taps());
         for items in rows {
             let id = panel.next_row_id;
             panel.next_row_id += 1;
@@ -3831,7 +3831,7 @@ mod tests {
     /// Where each row's notes start, in units — spacer frames, which have no
     /// length, left out. What every block edit is measured by: two rows are in
     /// step exactly to the extent that these agree.
-    fn note_starts(panel: &ComposerPanel) -> Vec<Vec<i64>> {
+    fn note_starts(panel: &SequencerPanel) -> Vec<Vec<i64>> {
         panel
             .rows
             .iter()
@@ -3849,11 +3849,11 @@ mod tests {
             .collect()
     }
 
-    /// A panel with one row of `items`, playing track `track`.
-    fn panel_with(items: &[(u8, Duration, Duration)], track: Option<u64>) -> ComposerPanel {
-        let mut panel = ComposerPanel::new(TrackRegistry::default(), crate::midi::new_midi_taps());
+    /// A panel with one row of `items`, playing instrument `instrument`.
+    fn panel_with(items: &[(u8, Duration, Duration)], instrument: Option<u64>) -> SequencerPanel {
+        let mut panel = SequencerPanel::new(InstrumentRegistry::default(), crate::midi::new_midi_taps());
         let mut row = row_with(items);
-        row.track_id = track;
+        row.instrument_id = instrument;
         panel.rows.push(row);
         panel
     }
@@ -3921,15 +3921,15 @@ mod tests {
 
     /// Pressing Play must not wait for the plugins.
     ///
-    /// The Composer loads one instance per row, and that is hundreds of
-    /// milliseconds — seconds, for a big synth or a long composition. Doing it
+    /// The Sequencer loads one instance per row, and that is hundreds of
+    /// milliseconds — seconds, for a big synth or a long sequence. Doing it
     /// in the button's own call freezes the window until the first sound, which
     /// is what "the transport lags" means. So Play hands the loading to a thread
     /// and returns: the test is that it comes back with no transport yet, and
     /// that one turns up on a later frame.
     #[test]
     fn pressing_play_hands_the_loading_to_a_thread() {
-        let registry = TrackRegistry::default();
+        let registry = InstrumentRegistry::default();
         let plugin = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("internal_plugins")
             .join("liblesynth_fourier.so");
@@ -3944,9 +3944,9 @@ mod tests {
             true,
             None,
         );
-        let mut panel = ComposerPanel::new(registry, crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry, crate::midi::new_midi_taps());
         let mut row = row_with(&[(60, frac(Fraction::Quarter), frac(Fraction::Eighth))]);
-        row.track_id = Some(id);
+        row.instrument_id = Some(id);
         panel.rows.push(row);
 
         let pressed = std::time::Instant::now();
@@ -3983,7 +3983,7 @@ mod tests {
         assert!(panel.player.is_none() && panel.preparing.is_none());
     }
 
-    /// A drum track names its notes after what they hit; an instrument track
+    /// A drum instrument names its notes after what they hit; a pitched instrument
     /// leaves them as pitches. The name is *added* to the pitch, never swapped
     /// for it — a kit that is not General MIDI still shows what is being sent.
     #[test]
@@ -4003,20 +4003,20 @@ mod tests {
     ///
     /// The panel compares these snapshots every frame while a repeat runs, so
     /// "nothing changed" has to come out equal — otherwise the transport would be
-    /// handed the same composition over and over.
+    /// handed the same sequence over and over.
     #[test]
-    fn a_live_snapshot_separates_note_edits_from_track_changes() {
+    fn a_live_snapshot_separates_note_edits_from_instrument_changes() {
         let items = [(60, frac(Fraction::Quarter), frac(Fraction::Eighth))];
         let panel = panel_with(&items, Some(7));
         let before = panel.live_snapshot();
         assert_eq!(
             before.rows,
             panel.live_snapshot().rows,
-            "an untouched composition must snapshot equal, or every frame \
+            "an untouched sequence must snapshot equal, or every frame \
              republishes it"
         );
 
-        // A note edit: same rows and tracks, different schedule — the transport
+        // A note edit: same rows and instruments, different schedule — the transport
         // can swap this in at the loop point.
         let mut edited = panel_with(&items, Some(7));
         edited.rows[0].items[0].pitch = 64;
@@ -4032,13 +4032,13 @@ mod tests {
         assert_ne!(after.rows, before.rows, "the tempo change did not move the notes");
         assert_ne!(after.span, before.span, "the loop length did not follow");
 
-        // A different track means a different plugin, which an audio callback
+        // A different instrument means a different plugin, which an audio callback
         // cannot load: structural, and reported rather than applied.
         let moved = panel_with(&items, Some(8));
         assert_ne!(
             moved.live_snapshot().shape,
             before.shape,
-            "pointing a row at another track must count as structural"
+            "pointing a row at another instrument must count as structural"
         );
 
         // A row with nothing to play is in neither the plans nor the snapshot.
@@ -4328,8 +4328,8 @@ mod tests {
         assert_eq!(pitch_name(PITCH_MAX), "B8");
     }
 
-    fn registry_with(names: &[&str]) -> (TrackRegistry, Vec<u64>) {
-        let registry = TrackRegistry::default();
+    fn registry_with(names: &[&str]) -> (InstrumentRegistry, Vec<u64>) {
+        let registry = InstrumentRegistry::default();
         let ids = names
             .iter()
             .map(|n| {
@@ -4345,28 +4345,28 @@ mod tests {
         (registry, ids)
     }
 
-    /// A row must never point at a track that is gone: the requirement is that
-    /// deleting the track behind a row silently re-points it, that an empty
-    /// registry leaves the select box on its placeholder, and that a track added
+    /// A row must never point at an instrument that is gone: the requirement is that
+    /// deleting the instrument behind a row silently re-points it, that an empty
+    /// registry leaves the select box on its placeholder, and that an instrument added
     /// afterwards is adopted.
     #[test]
-    fn a_row_follows_the_track_list_as_tracks_come_and_go() {
+    fn a_row_follows_the_instrument_list_as_instruments_come_and_go() {
         let (registry, ids) = registry_with(&["one", "two"]);
-        let mut panel = ComposerPanel::new(registry.clone(), crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry.clone(), crate::midi::new_midi_taps());
         panel.add_row();
-        assert_eq!(panel.rows[0].track_id, Some(ids[0]));
+        assert_eq!(panel.rows[0].instrument_id, Some(ids[0]));
 
-        // The track this row plays is deleted → it takes the next available one.
+        // The instrument this row plays is deleted → it takes the next available one.
         registry.remove(ids[0]);
-        panel.reconcile_tracks();
-        assert_eq!(panel.rows[0].track_id, Some(ids[1]));
+        panel.reconcile_instruments();
+        assert_eq!(panel.rows[0].instrument_id, Some(ids[1]));
 
-        // Every track deleted → the placeholder, not a dangling id.
+        // Every instrument deleted → the placeholder, not a dangling id.
         registry.remove(ids[1]);
-        panel.reconcile_tracks();
-        assert_eq!(panel.rows[0].track_id, None);
+        panel.reconcile_instruments();
+        assert_eq!(panel.rows[0].instrument_id, None);
 
-        // A track exists again → the row picks it up.
+        // An instrument exists again → the row picks it up.
         let late = registry.add(
             "late",
             std::path::PathBuf::from("/nonexistent/plugin.so"),
@@ -4374,21 +4374,21 @@ mod tests {
             false,
             None,
         );
-        panel.reconcile_tracks();
-        assert_eq!(panel.rows[0].track_id, Some(late));
+        panel.reconcile_instruments();
+        assert_eq!(panel.rows[0].instrument_id, Some(late));
     }
 
     /// Lay the whole panel out for real (headless egui, no window) in the states
     /// that have layout of their own: no rows, an empty row, a row of note and
-    /// space frames, two rows, and a row whose track list has gone empty.
+    /// space frames, two rows, and a row whose instrument list has gone empty.
     /// Catches the panics a layout test can catch — duplicate widget ids, bad
     /// rects — which no amount of model testing would.
     #[test]
     fn the_panel_lays_out_in_every_state_without_panicking() {
         let (registry, ids) = registry_with(&["one"]);
-        let mut panel = ComposerPanel::new(registry.clone(), crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry.clone(), crate::midi::new_midi_taps());
         let ctx = egui::Context::default();
-        let frame = |panel: &mut ComposerPanel| {
+        let frame = |panel: &mut SequencerPanel| {
             let _ = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| panel.ui(ui));
             });
@@ -4415,7 +4415,7 @@ mod tests {
         panel.rows[0].lead = Duration::new(MAX_WHOLES, Fraction::TwoHundredFiftySixth);
         frame(&mut panel);
 
-        // Two rows on the same track, which the spec allows. The longest length
+        // Two rows on the same instrument, which the spec allows. The longest length
         // the boxes can name, and a zero-length placeholder space, are the two
         // extremes a frame has to lay out at.
         panel.add_row();
@@ -4432,7 +4432,7 @@ mod tests {
 
         registry.remove(ids[0]);
         frame(&mut panel);
-        assert!(panel.rows.iter().all(|r| r.track_id.is_none()));
+        assert!(panel.rows.iter().all(|r| r.instrument_id.is_none()));
     }
     /// A recording is whatever length it is; a length in this panel is a whole
     /// number of note values at the current tempo. The fit is the closest the
@@ -4493,19 +4493,19 @@ mod tests {
         assert!(fit_hint(2.0, exact, spu).contains("exactly"));
     }
 
-    /// A row playing a wav track has no pitch to pick — the file sounds at the
+    /// A row playing a wav instrument has no pitch to pick — the file sounds at the
     /// pitch it was recorded at — so its note frame draws the *start* of the
     /// file in the pitch box's place, then the same three length boxes as every
     /// other frame. The space behind it is untouched: a silence is a silence
     /// whatever sounds around it.
     #[test]
     fn a_wav_row_s_note_frame_offers_a_start_and_no_pitch() {
-        let registry = TrackRegistry::default();
+        let registry = InstrumentRegistry::default();
         let id =
             registry.add_wav("a whole take.wav", std::path::PathBuf::from("/x/take.wav"), 5.8);
-        let mut panel = ComposerPanel::new(registry, crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry, crate::midi::new_midi_taps());
         panel.add_row();
-        assert_eq!(panel.rows[0].track_id, Some(id));
+        assert_eq!(panel.rows[0].instrument_id, Some(id));
         panel.rows[0].add_note(DEFAULT_PITCH);
         panel.rows[0].items[0].dur = Duration::with_num(0, 3, Fraction::Eighth);
         panel.rows[0].items[0].space = Duration::new(0, Fraction::Quarter);
@@ -4581,13 +4581,13 @@ mod tests {
     }
 
     /// The start belongs to the *file*, so it cannot point past the end of one.
-    /// A track swapped for a shorter recording, or a hand-edited project, must
+    /// An instrument swapped for a shorter recording, or a hand-edited project, must
     /// come back inside it rather than play silence.
     #[test]
     fn a_start_past_the_end_of_the_file_is_pulled_back_into_it() {
-        let registry = TrackRegistry::default();
+        let registry = InstrumentRegistry::default();
         registry.add_wav("short.wav", std::path::PathBuf::from("/x/short.wav"), 2.0);
-        let mut panel = ComposerPanel::new(registry, crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry, crate::midi::new_midi_taps());
         panel.add_row();
         panel.rows[0].add_note(DEFAULT_PITCH);
         panel.rows[0].items[0].start = 30.0;
@@ -4608,7 +4608,7 @@ mod tests {
     #[test]
     fn every_frame_draws_its_nominator_inside_its_card() {
         let (registry, _ids) = registry_with(&["one"]);
-        let mut panel = ComposerPanel::new(registry, crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry, crate::midi::new_midi_taps());
         panel.add_row();
         panel.rows[0].add_note(DEFAULT_PITCH);
         // A nominator on the note, a different one on its space, and the lead
@@ -4702,14 +4702,14 @@ mod tests {
     }
 
     /// A take with nothing to play against is still a take: it runs from the
-    /// button press, and what was played comes back as rows of the composition —
+    /// button press, and what was played comes back as rows of the sequence —
     /// rounded, on the track the recorder was pointed at.
     #[test]
-    fn a_take_becomes_rows_on_the_composition() {
+    fn a_take_becomes_rows_on_the_sequence() {
         let (registry, ids) = registry_with(&["one"]);
-        let mut panel = ComposerPanel::new(registry, crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry, crate::midi::new_midi_taps());
         let ctx = egui::Context::default();
-        panel.reconcile_tracks();
+        panel.reconcile_instruments();
         panel.start_recording(&ctx);
         // Nothing to play along to, so no transport was started — the take is
         // timed from the press instead.
@@ -4730,7 +4730,7 @@ mod tests {
         let status = panel.finish_recording().expect("the take reports itself");
         assert!(status.contains("2 note(s)"), "{status}");
         assert_eq!(panel.rows.len(), 1);
-        assert_eq!(panel.rows[0].track_id, Some(ids[0]));
+        assert_eq!(panel.rows[0].instrument_id, Some(ids[0]));
         assert_eq!(
             panel.rows[0].items.iter().map(|i| i.pitch).collect::<Vec<_>>(),
             vec![60, 64]
@@ -4746,21 +4746,21 @@ mod tests {
         assert!(tap.lock().unwrap().is_empty());
     }
 
-    /// A row's track select box must offer every track in the registry, not the
+    /// A row's instrument select box must offer every instrument in the registry, not the
     /// ones that happened to exist when the row was added.
     ///
     /// Driven with a real click on the real popup Area, and — crucially — the
-    /// box is **opened before the tracks are created**, which is what used to
+    /// box is **opened before the instruments are created**, which is what used to
     /// freeze it (an Area measures itself once per id). The assertion is on the
     /// text actually painted, so it fails whether the list is stale, the popup is
     /// clipped away, or two rows collide on one widget id.
     #[test]
-    fn a_rows_select_box_offers_tracks_created_after_the_row() {
-        let registry = TrackRegistry::default();
+    fn a_rows_select_box_offers_instruments_created_after_the_row() {
+        let registry = InstrumentRegistry::default();
         for n in 1..=2 {
             registry.add(format!("t{n}"), std::path::PathBuf::from("/x"), None, false, None);
         }
-        let mut panel = ComposerPanel::new(registry.clone(), crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry.clone(), crate::midi::new_midi_taps());
         let ctx = egui::Context::default();
         // The app's own spacing and text sizes: how tall a popup item is decides
         // how much of the list a stuck popup can still show, so the default
@@ -4782,7 +4782,7 @@ mod tests {
         ctx.set_style(style);
 
         // Every string the frame paints, popups included, with where it landed.
-        let run = |panel: &mut ComposerPanel, input: egui::RawInput| -> Vec<String> {
+        let run = |panel: &mut SequencerPanel, input: egui::RawInput| -> Vec<String> {
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
                     egui::ScrollArea::vertical()
@@ -4831,15 +4831,15 @@ mod tests {
             Some((name, nx.parse().ok()?, ny.parse().ok()?))
         }
 
-        /// A registry track's name, which is what this test's popups list.
-        fn is_track_name(name: &str) -> bool {
+        /// A registry instrument's name, which is what this test's popups list.
+        fn is_instrument_name(name: &str) -> bool {
             name.strip_prefix('t').is_some_and(|n| n.parse::<u32>().is_ok())
         }
 
-        // Which **tracks** the popup opened under `y` is listing: the items sit
+        // Which **instruments** the popup opened under `y` is listing: the items sit
         // in the popup's own left column, below the button that opened it.
         //
-        // Track names specifically, not "every string painted there": a popup is
+        // Instrument names specifically, not "every string painted there": a popup is
         // an `Area` and egui does not clip it to itself when it fits, so nothing
         // in the painted output distinguishes it from the row head behind it —
         // and the head's controls land at the same x, a pixel away in y. A
@@ -4852,7 +4852,7 @@ mod tests {
                     let (name, nx, ny) = painted(s)?;
                     // The popup's own column: its frame indents its items past
                     // the row controls behind it.
-                    (is_track_name(name)
+                    (is_instrument_name(name)
                         && (29.0..40.0).contains(&nx)
                         && ny > y + 10.0
                         && ny < y + 260.0)
@@ -4861,7 +4861,7 @@ mod tests {
                 .collect()
         };
 
-        // Where the row heads' select boxes are, found from the painted track
+        // Where the row heads' select boxes are, found from the painted instrument
         // name rather than hardcoded — the panel grows a header now and then,
         // and a test that silently clicks past it proves nothing.
         let boxes = |texts: &[String]| -> Vec<egui::Pos2> {
@@ -4869,7 +4869,7 @@ mod tests {
                 .iter()
                 .filter_map(|s| {
                     let (name, nx, ny) = painted(s)?;
-                    (is_track_name(name) && (20.0..28.0).contains(&nx))
+                    (is_instrument_name(name) && (20.0..28.0).contains(&nx))
                         .then(|| egui::pos2(nx + 66.0, ny + 2.0))
                 })
                 .collect()
@@ -4878,7 +4878,7 @@ mod tests {
         panel.add_row();
         let laid_out = run(&mut panel, egui::RawInput::default());
 
-        // The first row's select box, opened once while only one track exists.
+        // The first row's select box, opened once while only one instrument exists.
         // Opening it is the whole point: that first view is what its popup used
         // to be stuck at.
         let box1 = *boxes(&laid_out).first().expect("the row's select box is drawn");
@@ -4891,7 +4891,7 @@ mod tests {
              missed, and this test is not testing anything: {open:?}"
         );
 
-        // Close it, add a second row, then create another track.
+        // Close it, add a second row, then create another instrument.
         run(&mut panel, click(egui::pos2(900.0, 900.0)));
         let closed = run(&mut panel, egui::RawInput::default());
         assert!(
@@ -4914,7 +4914,7 @@ mod tests {
         assert_eq!(
             listed(&reopened, box1.y),
             vec!["t1", "t2", "t3", "t4"],
-            "tracks created after this row's select box was first opened are \
+            "instruments created after this row's select box was first opened are \
              missing from it: {reopened:?}"
         );
 
@@ -4927,19 +4927,19 @@ mod tests {
         assert_eq!(
             listed(&second, box2.y),
             vec!["t1", "t2", "t3", "t4"],
-            "the second row's select box is missing a track: {second:?}"
+            "the second row's select box is missing an instrument: {second:?}"
         );
     }
 
     /// The requirement's second half: a project whose grid has been deleted must
-    /// load with that row marked, must not have some other track silently
+    /// load with that row marked, must not have some other instrument silently
     /// adopted onto it, must still say what it wanted, and must **survive being
     /// saved again** — losing the file name on the next save would make the
     /// damage permanent.
     #[test]
     fn a_missing_source_is_kept_until_the_user_replaces_it() {
         let (registry, ids) = registry_with(&["other"]);
-        let mut panel = ComposerPanel::new(registry.clone(), crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry.clone(), crate::midi::new_midi_taps());
         let loaded = project::Project {
             name: "Song".to_string(),
             tempo_bpm: 100.0,
@@ -4947,8 +4947,8 @@ mod tests {
             repeat_to: Duration::new(0, Fraction::None),
             rows: vec![project::ProjectRow {
                 name: "the voice".to_string(),
-                track_name: "Voice".to_string(),
-                source: project::TrackSource::LeSynth { file: "Voice.lsft".to_string(), state: None },
+                instrument_name: "Voice".to_string(),
+                source: project::InstrumentSource::LeSynth { file: "Voice.lsft".to_string(), state: None },
                 gain: 0.5,
                 lead: Duration::new(0, Fraction::Eighth),
                 enabled: true,
@@ -4968,41 +4968,41 @@ mod tests {
 
         assert_eq!(panel.rows.len(), 1);
         assert!(panel.rows[0].missing.is_some(), "the row must be marked");
-        assert_eq!(panel.rows[0].track_id, None);
+        assert_eq!(panel.rows[0].instrument_id, None);
         assert_eq!(panel.rows[0].gain, 0.5);
         assert!(!panel.rows[0].autosave, "autosave must round-trip");
         assert_eq!(panel.rows[0].items.len(), 1);
 
-        // A track exists, and the row must NOT be quietly moved onto it.
-        panel.reconcile_tracks();
-        assert_eq!(panel.rows[0].track_id, None, "an unresolved row was adopted silently");
+        // An instrument exists, and the row must NOT be quietly moved onto it.
+        panel.reconcile_instruments();
+        assert_eq!(panel.rows[0].instrument_id, None, "an unresolved row was adopted silently");
 
         // Saving again keeps the reference rather than erasing it.
-        let again = panel.to_project("Song", |_| project::TrackSource::None);
+        let again = panel.to_project("Song", |_| project::InstrumentSource::None);
         assert_eq!(
             again.rows[0].source,
-            project::TrackSource::LeSynth { file: "Voice.lsft".to_string(), state: None },
+            project::InstrumentSource::LeSynth { file: "Voice.lsft".to_string(), state: None },
             "a re-save lost what the row was looking for"
         );
-        assert_eq!(again.rows[0].track_name, "Voice.lsft");
+        assert_eq!(again.rows[0].instrument_name, "Voice.lsft");
 
         // The user picks a replacement: the row becomes ordinary again.
-        panel.rows[0].track_id = Some(ids[0]);
+        panel.rows[0].instrument_id = Some(ids[0]);
         panel.rows[0].missing = None;
-        panel.reconcile_tracks();
-        assert_eq!(panel.rows[0].track_id, Some(ids[0]));
-        let fixed = panel.to_project("Song", |_| project::TrackSource::LeSynthDefault);
-        assert_eq!(fixed.rows[0].source, project::TrackSource::LeSynthDefault);
+        panel.reconcile_instruments();
+        assert_eq!(panel.rows[0].instrument_id, Some(ids[0]));
+        let fixed = panel.to_project("Song", |_| project::InstrumentSource::LeSynthDefault);
+        assert_eq!(fixed.rows[0].source, project::InstrumentSource::LeSynthDefault);
         assert!(fixed.rows[0].enabled, "a row that plays must be saved as one");
     }
 
-    /// Loading replaces the composition, and everything on a row that is not the
+    /// Loading replaces the sequence, and everything on a row that is not the
     /// notes has to come back too — a project that forgets the tempo or a row's
     /// lead is not a saved project.
     #[test]
     fn a_loaded_project_restores_every_row_setting() {
         let (registry, ids) = registry_with(&["a", "b"]);
-        let mut panel = ComposerPanel::new(registry, crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry, crate::midi::new_midi_taps());
         panel.add_row();
         let loaded = project::Project {
             name: "Two".to_string(),
@@ -5012,8 +5012,8 @@ mod tests {
             rows: vec![
                 project::ProjectRow {
                     name: "first".to_string(),
-                    track_name: "a".to_string(),
-                    source: project::TrackSource::LeSynthDefault,
+                    instrument_name: "a".to_string(),
+                    source: project::InstrumentSource::LeSynthDefault,
                     gain: 1.5,
                     lead: Duration::new(1, Fraction::Sixteenth),
                     // Switched off in the saved project: a row that was muted
@@ -5029,8 +5029,8 @@ mod tests {
                     // names has every row: this one must still come back with a
                     // name of its own.
                     name: String::new(),
-                    track_name: "b".to_string(),
-                    source: project::TrackSource::LeSynthDefault,
+                    instrument_name: "b".to_string(),
+                    source: project::InstrumentSource::LeSynthDefault,
                     gain: 0.25,
                     lead: Duration::new(0, Fraction::None),
                     enabled: true,
@@ -5055,7 +5055,7 @@ mod tests {
         assert_eq!(panel.tempo_bpm, 88.0);
         assert_eq!(panel.rows[0].gain, 1.5);
         assert_eq!(panel.rows[0].lead, Duration::new(1, Fraction::Sixteenth));
-        assert_eq!(panel.rows[1].track_id, Some(ids[1]));
+        assert_eq!(panel.rows[1].instrument_id, Some(ids[1]));
         assert!(!panel.rows[0].enabled, "a row saved switched off must load switched off");
         assert!(panel.rows[1].enabled);
         assert!(!panel.rows[1].autosave);
@@ -5073,7 +5073,7 @@ mod tests {
             panel.rows[1].name
         );
         // And only rows with autosave on ask for a fresh grid.
-        assert_eq!(panel.autosave_track_ids(), vec![ids[0]]);
+        assert_eq!(panel.autosave_instrument_ids(), vec![ids[0]]);
     }
 
     /// A block is built by clicking frames: the boxes are checkboxes, so a
@@ -5271,7 +5271,7 @@ mod tests {
     /// end of each row: rows are played from zero together, so a block pasted
     /// row by row would be dealt out as an echo of itself.
     #[test]
-    fn a_pasted_block_lands_at_the_end_of_the_composition_on_every_row_at_once() {
+    fn a_pasted_block_lands_at_the_end_of_the_sequence_on_every_row_at_once() {
         let mut panel = panel_with_rows(&[
             &[(60, frac(Fraction::Quarter), frac(Fraction::None))],
             &[(36, frac(Fraction::Eighth), frac(Fraction::None))],
@@ -5296,7 +5296,7 @@ mod tests {
 
     /// A block copied off a row that has since been removed is not quietly
     /// pasted somewhere else: the frames name a pitch, a length and a place in
-    /// a file that mean what they mean on the track they were written for.
+    /// a file that mean what they mean on the instrument they were written for.
     #[test]
     fn a_paste_says_when_the_row_it_was_copied_from_is_gone() {
         let mut panel = panel_with_rows(&[
@@ -5369,7 +5369,7 @@ mod tests {
 
     /// A row switched off is silent, not gone: the transport and an export skip
     /// it, and everything on it — its notes, its place, the length it gives the
-    /// composition — stays exactly where the user left it. Muting a part to
+    /// sequence — stays exactly where the user left it. Muting a part to
     /// hear the one under it must cost nothing to undo.
     #[test]
     fn a_row_switched_off_plays_nothing_and_loses_nothing() {
@@ -5380,10 +5380,10 @@ mod tests {
             ],
             &[(48, Duration::new(1, Fraction::None), frac(Fraction::None))],
         ]);
-        // A track behind each row, which is the other half of "has something to
+        // An instrument behind each row, which is the other half of "has something to
         // play"; the registry is not asked anything here.
         for row in &mut panel.rows {
-            row.track_id = Some(7);
+            row.instrument_id = Some(7);
             assert!(row.enabled, "a new row plays");
         }
         let length = panel.end_units();
@@ -5475,7 +5475,7 @@ mod tests {
         ]);
         let ctx = egui::Context::default();
         crate::gui::app::DawApp::configure_style(&ctx);
-        let run = |panel: &mut ComposerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
+        let run = |panel: &mut SequencerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| panel.ui(ui));
             });
@@ -5564,7 +5564,7 @@ mod tests {
         assert_eq!(row.lane_playhead(Some(3.5)), Some(3.5));
     }
 
-    /// “Enable all” beside Add Track Row, through the real widget: it reports
+    /// “Enable all” beside Add Instrument Row, through the real widget: it reports
     /// what is true of the rows, and one click carries every row with it. The
     /// state is derived rather than stored, which is exactly the sort of switch
     /// that can be drawn correctly and do nothing.
@@ -5576,7 +5576,7 @@ mod tests {
         ]);
         let ctx = egui::Context::default();
         crate::gui::app::DawApp::configure_style(&ctx);
-        let run = |panel: &mut ComposerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
+        let run = |panel: &mut SequencerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| panel.ui(ui));
             });
@@ -5623,7 +5623,7 @@ mod tests {
         let laid = run(&mut panel, egui::RawInput::default());
         let all = at(&laid, "Enable all");
 
-        // Every row is on, so one click switches the composition off.
+        // Every row is on, so one click switches the sequence off.
         run(&mut panel, click(all));
         run(&mut panel, egui::RawInput::default());
         assert!(
@@ -5666,7 +5666,7 @@ mod tests {
         ]]);
         let ctx = egui::Context::default();
         crate::gui::app::DawApp::configure_style(&ctx);
-        let run = |panel: &mut ComposerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
+        let run = |panel: &mut SequencerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| panel.ui(ui));
             });
@@ -5745,7 +5745,7 @@ mod tests {
     #[test]
     fn a_new_row_is_named_by_the_box_or_by_a_uuid() {
         let (registry, _) = registry_with(&["one"]);
-        let mut panel = ComposerPanel::new(registry, crate::midi::new_midi_taps());
+        let mut panel = SequencerPanel::new(registry, crate::midi::new_midi_taps());
 
         panel.add_row();
         let auto = panel.rows[0].name.clone();
@@ -5787,17 +5787,17 @@ mod tests {
     }
 
     /// A repeat's window is two *lengths*, both counted from the beginning of
-    /// the composition — so the pair can be read against each other, and a stop
+    /// the sequence — so the pair can be read against each other, and a stop
     /// left at zero means the end rather than the impossible.
     #[test]
     fn a_repeat_window_is_two_lengths_from_the_beginning() {
-        // Eight quarter notes, back to back: two whole notes of composition.
+        // Eight quarter notes, back to back: two whole notes of sequence.
         let items = [(60u8, frac(Fraction::Quarter), frac(Fraction::None)); 8];
         let mut panel = panel_with_rows(&[&items]);
         let end = panel.end_units();
         assert_eq!(end, 2 * UNITS_PER_WHOLE, "two whole notes of quarters");
 
-        // Untouched, the window is the whole composition — what a repeat looped
+        // Untouched, the window is the whole sequence — what a repeat looped
         // over before there were boxes to trim it with. A stop of zero is not
         // "stop where you started"; it is the box nobody has touched, and it
         // means the end.
@@ -5820,7 +5820,7 @@ mod tests {
             "{span:?}"
         );
 
-        // Both ends are positions in the composition now, so writing more music
+        // Both ends are positions in the sequence now, so writing more music
         // leaves a stop that was asked for exactly where it was asked for. Only
         // a stop of zero follows the music.
         panel.rows[0].add_note(60);
@@ -5839,7 +5839,7 @@ mod tests {
 
         // A start on or past the stop asks for a window with nothing in it. That
         // is not a short loop — it is a transport with no samples to play — so
-        // the whole composition is looped and the panel says the boxes are being
+        // the whole sequence is looped and the panel says the boxes are being
         // overruled.
         panel.repeat_to = Duration::new(0, Fraction::Half);
         panel.repeat_from = Duration::new(0, Fraction::Half);
@@ -5858,12 +5858,12 @@ mod tests {
     fn moving_a_repeat_window_is_a_live_edit_not_a_restart() {
         let items = [(60u8, frac(Fraction::Quarter), frac(Fraction::None)); 8];
         let mut panel = panel_with_rows(&[&items]);
-        panel.rows[0].track_id = Some(7);
+        panel.rows[0].instrument_id = Some(7);
         let before = panel.live_snapshot();
 
         panel.repeat_from = Duration::new(0, Fraction::Half);
         let after = panel.live_snapshot();
-        assert_eq!(after.shape, before.shape, "a window is not a row or a track");
+        assert_eq!(after.shape, before.shape, "a window is not a row or an instrument");
         assert_eq!(after.rows, before.rows, "…and it moves no notes");
         assert_ne!(after.span, before.span, "the window did not reach the transport");
     }
@@ -5878,7 +5878,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         crate::gui::app::DawApp::configure_style(&ctx);
-        let mut draw = |panel: &mut ComposerPanel| -> Vec<String> {
+        let mut draw = |panel: &mut SequencerPanel| -> Vec<String> {
             let out = ctx.run(egui::RawInput::default(), |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| panel.ui(ui));
             });
@@ -5903,7 +5903,7 @@ mod tests {
         // "from … to …" and nothing else: a word saying the pair are counted
         // off the beginning would sit behind the second set of boxes and read
         // as if it qualified only those. The seconds beside them do that job —
-        // they are the composition's own clock — and the hovers say it outright.
+        // they are the sequence's own clock — and the hovers say it outright.
         for label in ["🔁 Repeat from", "to"] {
             assert!(texts.iter().any(|t| t == label), "{label:?} is not drawn: {texts:?}");
         }
@@ -5943,7 +5943,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         crate::gui::app::DawApp::configure_style(&ctx);
-        let run = |panel: &mut ComposerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
+        let run = |panel: &mut SequencerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| panel.ui(ui));
             });
@@ -6141,10 +6141,10 @@ mod tests {
         assert_eq!(row.name, "kick 2", "the name is taken trimmed");
     }
 
-    /// The two Add Track Row buttons, through the real widgets: which end of the
+    /// The two Add Instrument Row buttons, through the real widgets: which end of the
     /// list a new lane lands on is the whole difference between them, and a
     /// button that draws in the right place and inserts in the wrong one looks
-    /// identical until the composition is read back.
+    /// identical until the sequence is read back.
     #[test]
     fn the_top_add_row_button_puts_the_lane_first_and_the_bottom_one_last() {
         let mut panel = panel_with_rows(&[
@@ -6155,7 +6155,7 @@ mod tests {
 
         let ctx = egui::Context::default();
         crate::gui::app::DawApp::configure_style(&ctx);
-        let run = |panel: &mut ComposerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
+        let run = |panel: &mut SequencerPanel, input: egui::RawInput| -> Vec<(String, egui::Pos2)> {
             let out = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| panel.ui(ui));
             });
@@ -6196,7 +6196,7 @@ mod tests {
         let buttons = |texts: &[(String, egui::Pos2)]| -> Vec<egui::Pos2> {
             let mut ps: Vec<egui::Pos2> = texts
                 .iter()
-                .filter(|(t, _)| t == "➕ Add Track Row")
+                .filter(|(t, _)| t == "➕ Add Instrument Row")
                 .map(|(_, p)| egui::pos2(p.x + 4.0, p.y + 6.0))
                 .collect();
             ps.sort_by(|a, b| a.y.total_cmp(&b.y));
@@ -6266,9 +6266,9 @@ mod tests {
                 f.as_ref().and_then(|f| std::fs::read(dir.join(f)).ok())
             };
             let source = match &prow.source {
-                project::TrackSource::LeSynth { file, state } => {
+                project::InstrumentSource::LeSynth { file, state } => {
                     crate::gui::registry::PlaybackSource {
-                        name: prow.track_name.clone(),
+                        name: prow.instrument_name.clone(),
                         plugin_path: internal.clone(),
                         class_id: Some(crate::vst::class_ids::FOURIER_SYNTH),
                         plugin_id: None,
@@ -6280,9 +6280,9 @@ mod tests {
                         wav: None,
                     }
                 }
-                project::TrackSource::Vst { path, class_id, plugin_id, state } => {
+                project::InstrumentSource::Vst { path, class_id, plugin_id, state } => {
                     crate::gui::registry::PlaybackSource {
-                        name: prow.track_name.clone(),
+                        name: prow.instrument_name.clone(),
                         plugin_path: path.clone(),
                         class_id: *class_id,
                         plugin_id: plugin_id.clone(),
@@ -6308,7 +6308,7 @@ mod tests {
                 }
                 at += item.total_units();
             }
-            println!("row {i}: {} — {} note(s), gain {}", prow.track_name, notes.len(), prow.gain);
+            println!("row {i}: {} — {} note(s), gain {}", prow.instrument_name, notes.len(), prow.gain);
             plans.push(player::RowPlan {
                 row_id: i as u64,
                 source,

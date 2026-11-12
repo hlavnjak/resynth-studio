@@ -14,13 +14,13 @@
 //! `.rsyn` — the ReSynth Studio project format.
 //!
 //! A saved project is a **folder**, not a file: `MySong/` holds `MySong.rsyn`,
-//! one `.lsft` per LeSynth Fourier track any row plays, and one `.vststate` per
-//! plugin track — the plugin's own state, which is where it keeps the knobs
-//! the user set. A LeSynth track has both, and needs both: the `.lsft` is the
+//! one `.lsft` per LeSynth Fourier instrument any row plays, and one `.vststate` per
+//! plugin instrument — the plugin's own state, which is where it keeps the knobs
+//! the user set. A LeSynth instrument has both, and needs both: the `.lsft` is the
 //! harmonic grid, the `.vststate` is every control that drew it (curve type,
 //! offset, granularity, and the nested-Fourier sliders), which the grid does
 //! not contain. The folder is the unit you move, copy or hand to someone else,
-//! and it carries its own sounds — the audio file behind a wav track included,
+//! and it carries its own sounds — the audio file behind a wav instrument included,
 //! copied into `audio/` on save, because a recording kept only by path is lost
 //! the day its folder is tidied away. What is left outside is a third-party
 //! plugin's *binary*, which is not ours to copy, and is recorded as the path it
@@ -43,7 +43,7 @@
 //!
 //! [row]
 //! name = lead
-//! track = LeSynth Fourier 1
+//! instrument = LeSynth Fourier 1
 //! source = lesynth voice.lsft
 //! state = LeSynth Fourier 1.vststate
 //! gain = 1
@@ -67,10 +67,10 @@
 //! rather than a silent misreading.
 //!
 //! The two `repeat-` keys are the window a repeat loops over, each a length
-//! **from the beginning** of the composition. `repeat-to` of zero — which is
-//! how it is written when it is absent — is the end of the composition. Both
+//! **from the beginning** of the sequence. `repeat-to` of zero — which is
+//! how it is written when it is absent — is the end of the sequence. Both
 //! are written only when they are not zero, so a project that loops the whole
-//! composition, which is every project that has not been told otherwise, is
+//! sequence, which is every project that has not been told otherwise, is
 //! byte for byte the file it always was.
 //!
 //! Unknown keys are skipped, so a field added later loads in an older build
@@ -113,7 +113,7 @@ pub const LEGACY_EXTENSION: &str = "gmstn";
 
 /// Where a row's sound comes from, as recorded in the manifest.
 #[derive(Clone, Debug, PartialEq)]
-pub enum TrackSource {
+pub enum InstrumentSource {
     /// A LeSynth Fourier grid saved beside the manifest. The name is relative to
     /// the project folder, so the folder stays portable.
     ///
@@ -123,7 +123,7 @@ pub enum TrackSource {
     /// none of which is in the grid. `None` is a project saved before this was
     /// kept, which reloads its curves with the controls at their defaults.
     LeSynth { file: String, state: Option<String> },
-    /// A LeSynth Fourier track carrying no grid — the plugin's own synth mode.
+    /// A LeSynth Fourier instrument carrying no grid — the plugin's own synth mode.
     LeSynthDefault,
     /// A custom plugin — of any format, despite the name, which is the one
     /// the manifest has always used — by absolute path. Not portable, and
@@ -151,17 +151,17 @@ pub enum TrackSource {
     /// or a file that was already gone when it was saved; a relative one is
     /// resolved against the folder by [`Project::resolve_audio`].
     Wav { path: PathBuf },
-    /// The row had no track assigned when it was saved.
+    /// The row had no instrument assigned when it was saved.
     None,
 }
 
-impl TrackSource {
+impl InstrumentSource {
     /// What this source needs from the filesystem, for the caller to check
     /// before trying to load it. `None` for sources that need nothing.
     pub fn required_path(&self, dir: &Path) -> Option<PathBuf> {
         match self {
             Self::LeSynth { file, .. } => Some(dir.join(file)),
-            // The plugin itself. A missing `.vststate` is not fatal — the track
+            // The plugin itself. A missing `.vststate` is not fatal — the instrument
             // loads with the plugin's defaults — so it is not required here.
             Self::Vst { path, plugin_id, .. } => crate::plugin::has_file(path, plugin_id.as_deref())
                 .then(|| path.clone()),
@@ -178,7 +178,7 @@ impl TrackSource {
             Self::LeSynth { file, .. } => file.clone(),
             Self::Vst { path, .. } | Self::Wav { path } => crate::file_label(path),
             Self::LeSynthDefault => "LeSynth Fourier".to_string(),
-            Self::None => "no track".to_string(),
+            Self::None => "no instrument".to_string(),
         }
     }
 }
@@ -190,10 +190,10 @@ pub struct ProjectRow {
     /// written before rows had names, and reads as "unnamed": the row is given
     /// a fresh UUID when it is loaded, exactly as a new row would be.
     pub name: String,
-    /// Display name of the track, kept so a row whose source has gone missing
+    /// Display name of the instrument, kept so a row whose source has gone missing
     /// can still say what it was looking for.
-    pub track_name: String,
-    pub source: TrackSource,
+    pub instrument_name: String,
+    pub source: InstrumentSource,
     pub gain: f32,
     pub lead: Duration,
     /// Play this row at all — see [`super::Row::enabled`]. A project written
@@ -210,14 +210,14 @@ pub struct ProjectRow {
     pub items: Vec<Item>,
 }
 
-/// A whole composition, as it sits in the manifest.
+/// A whole sequence, as it sits in the manifest.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Project {
     pub name: String,
     pub tempo_bpm: f32,
     /// The repeat window: where a repeat starts and where it stops, each a
-    /// length from the beginning of the composition. A stop of zero is the end
-    /// of the composition, which is what a repeat loops to without being told
+    /// length from the beginning of the sequence. A stop of zero is the end
+    /// of the sequence, which is what a repeat loops to without being told
     /// otherwise.
     pub repeat_from: Duration,
     pub repeat_to: Duration,
@@ -230,7 +230,7 @@ impl Project {
         s += &format!("name = {}\n", one_line(&self.name));
         s += &format!("tempo = {}\n", num(self.tempo_bpm));
         // Only when there is a window to record. A repeat that loops the whole
-        // composition writes nothing, so files that do not use one are
+        // sequence writes nothing, so files that do not use one are
         // unchanged — and an older build, which skips keys it does not know,
         // loads one that does and simply loops the whole thing.
         if self.repeat_from.units() > 0 {
@@ -247,14 +247,14 @@ impl Project {
             if !row.name.is_empty() {
                 s += &format!("name = {}\n", one_line(&row.name));
             }
-            s += &format!("track = {}\n", one_line(&row.track_name));
+            s += &format!("track = {}\n", one_line(&row.instrument_name));
             s += &format!("source = {}\n", write_source(&row.source));
-            if let TrackSource::Vst { state: Some(file), .. }
-            | TrackSource::LeSynth { state: Some(file), .. } = &row.source
+            if let InstrumentSource::Vst { state: Some(file), .. }
+            | InstrumentSource::LeSynth { state: Some(file), .. } = &row.source
             {
                 s += &format!("state = {}\n", one_line(file));
             }
-            if let TrackSource::Vst { plugin_id: Some(id), .. } = &row.source {
+            if let InstrumentSource::Vst { plugin_id: Some(id), .. } = &row.source {
                 s += &format!("plugin-id = {}\n", one_line(id));
             }
             s += &format!("gain = {}\n", num(row.gain));
@@ -308,8 +308,8 @@ impl Project {
             if line == "[row]" {
                 project.rows.push(ProjectRow {
                     name: String::new(),
-                    track_name: String::new(),
-                    source: TrackSource::None,
+                    instrument_name: String::new(),
+                    source: InstrumentSource::None,
                     gain: 1.0,
                     lead: Duration::new(0, Fraction::None),
                     enabled: true,
@@ -329,20 +329,20 @@ impl Project {
                 ("tempo", None) => project.tempo_bpm = value.parse().unwrap_or(120.0),
                 ("repeat-from", None) => project.repeat_from = read_duration(value)?,
                 ("repeat-to", None) => project.repeat_to = read_duration(value)?,
-                ("track", Some(row)) => row.track_name = value.to_string(),
+                ("track", Some(row)) => row.instrument_name = value.to_string(),
                 ("source", Some(row)) => row.source = read_source(value)?,
                 // Belongs to the source above it, which is where the writer puts
                 // it. Ignored for any other kind of source.
                 ("state", Some(row)) => {
-                    if let TrackSource::Vst { state, .. }
-                    | TrackSource::LeSynth { state, .. } = &mut row.source
+                    if let InstrumentSource::Vst { state, .. }
+                    | InstrumentSource::LeSynth { state, .. } = &mut row.source
                     {
                         *state = Some(value.to_string());
                     }
                 }
                 // The same: the plugin inside the file the source names.
                 ("plugin-id", Some(row)) => {
-                    if let TrackSource::Vst { plugin_id, .. } = &mut row.source {
+                    if let InstrumentSource::Vst { plugin_id, .. } = &mut row.source {
                         *plugin_id = Some(value.to_string());
                     }
                 }
@@ -374,7 +374,7 @@ impl Project {
     /// missing-file search — wants the file itself.
     pub fn resolve_audio(&mut self, dir: &Path) {
         for row in &mut self.rows {
-            if let TrackSource::Wav { path } = &mut row.source {
+            if let InstrumentSource::Wav { path } = &mut row.source {
                 if path.is_relative() {
                     *path = dir.join(&*path);
                 }
@@ -385,9 +385,9 @@ impl Project {
     /// Re-point every wav and plugin source whose saved path no longer exists
     /// to an entry of the same name under `wav_dirs` / `plugin_dirs`, searched
     /// in order and up to [`RELOCATE_DEPTH`] levels deep. Returns what moved,
-    /// as (track name, saved path, found path).
+    /// as (instrument name, saved path, found path).
     ///
-    /// Those two sources are saved by absolute path (see [`TrackSource::Wav`]),
+    /// Those two sources are saved by absolute path (see [`InstrumentSource::Wav`]),
     /// so a project folder copied to another machine — another home directory,
     /// another OS — names files that are not there, though the same recording
     /// sits in that machine's recordings folder and the same plugin bundle in
@@ -402,8 +402,8 @@ impl Project {
         let mut moved = Vec::new();
         for row in &mut self.rows {
             let (path, dirs) = match &mut row.source {
-                TrackSource::Wav { path } => (path, wav_dirs),
-                TrackSource::Vst { path, plugin_id, .. }
+                InstrumentSource::Wav { path } => (path, wav_dirs),
+                InstrumentSource::Vst { path, plugin_id, .. }
                     if crate::plugin::has_file(path, plugin_id.as_deref()) =>
                 {
                     (path, plugin_dirs)
@@ -415,7 +415,7 @@ impl Project {
             }
             let Some(name) = path.file_name() else { continue };
             if let Some(found) = find_by_name(dirs, name, RELOCATE_DEPTH) {
-                moved.push((row.track_name.clone(), path.clone(), found.clone()));
+                moved.push((row.instrument_name.clone(), path.clone(), found.clone()));
                 *path = found;
             }
         }
@@ -538,14 +538,14 @@ pub fn sanitize_name(name: &str) -> String {
     }
 }
 
-/// A `.lsft` file name for a track, unique within `taken`.
-pub fn grid_file_name(track_name: &str, taken: &[String]) -> String {
-    unique_file_name(track_name, "lsft", taken)
+/// A `.lsft` file name for an instrument, unique within `taken`.
+pub fn grid_file_name(instrument_name: &str, taken: &[String]) -> String {
+    unique_file_name(instrument_name, "lsft", taken)
 }
 
-/// A file named after a track, with extension `ext`, unique within `taken`.
-pub fn unique_file_name(track_name: &str, ext: &str, taken: &[String]) -> String {
-    let stem = sanitize_name(track_name);
+/// A file named after an instrument, with extension `ext`, unique within `taken`.
+pub fn unique_file_name(instrument_name: &str, ext: &str, taken: &[String]) -> String {
+    let stem = sanitize_name(instrument_name);
     let mut candidate = format!("{stem}.{ext}");
     let mut n = 2;
     while taken.iter().any(|t| t.eq_ignore_ascii_case(&candidate)) {
@@ -641,39 +641,39 @@ fn frac_from_token(t: &str) -> Result<(u8, Fraction)> {
     Ok((num, frac))
 }
 
-fn write_source(s: &TrackSource) -> String {
+fn write_source(s: &InstrumentSource) -> String {
     match s {
-        TrackSource::LeSynth { file, .. } => format!("lesynth {}", one_line(file)),
-        TrackSource::LeSynthDefault => "lesynth -".to_string(),
+        InstrumentSource::LeSynth { file, .. } => format!("lesynth {}", one_line(file)),
+        InstrumentSource::LeSynthDefault => "lesynth -".to_string(),
         // The state file, if any, rides on its own `state =` line: the path here
         // is the rest of the line, so nothing can follow it.
-        TrackSource::Vst { path, class_id, .. } => {
+        InstrumentSource::Vst { path, class_id, .. } => {
             let mut out = format!("vst {}", one_line(&path.display().to_string()));
             if let Some(id) = class_id {
                 out = format!("vst:{} {}", hex_class(id), one_line(&path.display().to_string()));
             }
             out
         }
-        TrackSource::Wav { path } => format!("wav {}", one_line(&path.display().to_string())),
-        TrackSource::None => "none".to_string(),
+        InstrumentSource::Wav { path } => format!("wav {}", one_line(&path.display().to_string())),
+        InstrumentSource::None => "none".to_string(),
     }
 }
 
-fn read_source(v: &str) -> Result<TrackSource> {
+fn read_source(v: &str) -> Result<InstrumentSource> {
     let (kind, rest) = v.split_once(' ').unwrap_or((v, ""));
     let rest = rest.trim();
     if kind == "none" {
-        return Ok(TrackSource::None);
+        return Ok(InstrumentSource::None);
     }
     if kind == "lesynth" {
         return Ok(if rest.is_empty() || rest == "-" {
-            TrackSource::LeSynthDefault
+            InstrumentSource::LeSynthDefault
         } else {
-            TrackSource::LeSynth { file: rest.to_string(), state: None }
+            InstrumentSource::LeSynth { file: rest.to_string(), state: None }
         });
     }
     if let Some(hex) = kind.strip_prefix("vst:") {
-        return Ok(TrackSource::Vst {
+        return Ok(InstrumentSource::Vst {
             path: PathBuf::from(rest),
             class_id: Some(class_from_hex(hex)?),
             plugin_id: None,
@@ -681,17 +681,17 @@ fn read_source(v: &str) -> Result<TrackSource> {
         });
     }
     if kind == "wav" {
-        return Ok(TrackSource::Wav { path: PathBuf::from(rest) });
+        return Ok(InstrumentSource::Wav { path: PathBuf::from(rest) });
     }
     if kind == "vst" {
-        return Ok(TrackSource::Vst {
+        return Ok(InstrumentSource::Vst {
             path: PathBuf::from(rest),
             class_id: None,
             plugin_id: None,
             state: None,
         });
     }
-    bail!("unknown track source {v:?}")
+    bail!("unknown instrument source {v:?}")
 }
 
 fn hex_class(id: &[i8; 16]) -> String {
@@ -712,7 +712,7 @@ fn class_from_hex(hex: &str) -> Result<[i8; 16]> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gui::composer::UNITS_PER_WHOLE;
+    use crate::gui::sequencer::UNITS_PER_WHOLE;
 
     fn sample() -> Project {
         Project {
@@ -723,8 +723,8 @@ mod tests {
             rows: vec![
                 ProjectRow {
                     name: "lead".to_string(),
-                    track_name: "LeSynth Fourier 1".to_string(),
-                    source: TrackSource::LeSynth { file: "voice.lsft".to_string(), state: None },
+                    instrument_name: "LeSynth Fourier 1".to_string(),
+                    source: InstrumentSource::LeSynth { file: "voice.lsft".to_string(), state: None },
                     gain: 0.75,
                     lead: Duration::new(0, Fraction::Eighth),
                     enabled: true,
@@ -754,8 +754,8 @@ mod tests {
                     // A name with spaces in it, and one that is not a UUID:
                     // whatever the user typed is what comes back.
                     name: "the other one".to_string(),
-                    track_name: "some-plugin.so".to_string(),
-                    source: TrackSource::Vst {
+                    instrument_name: "some-plugin.so".to_string(),
+                    source: InstrumentSource::Vst {
                         path: PathBuf::from("/opt/vst3/some plugin.so"),
                         class_id: Some([1, 2, 3, -4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, -16]),
                         plugin_id: None,
@@ -774,13 +774,13 @@ mod tests {
         }
     }
 
-    /// A wav track is a path and nothing else: no file beside the manifest, no
+    /// A wav instrument is a path and nothing else: no file beside the manifest, no
     /// state, no class id. The row that plays one must come back naming the same
     /// file — losing it would leave the row silent with nothing to say why.
     #[test]
     fn a_wav_row_round_trips_as_its_path() {
         let mut p = sample();
-        p.rows[1].source = TrackSource::Wav {
+        p.rows[1].source = InstrumentSource::Wav {
             path: PathBuf::from("/home/kuba/Music/my voice.wav"),
         };
         // And its notes carry where in the file they start — the field only a
@@ -808,7 +808,7 @@ mod tests {
         );
         // No `state =` rides behind it: there is nothing beside the manifest to
         // point at.
-        assert!(!text.contains("state ="), "a wav track saves no state file: {text}");
+        assert!(!text.contains("state ="), "a wav instrument saves no state file: {text}");
         // A start writes a sixth field; a note that starts at the top of its
         // file writes the five this format has always written.
         assert!(text.contains("note = 60 0 1/4 0 1/8 1.25\n"), "{text}");
@@ -843,12 +843,12 @@ mod tests {
         assert_eq!(back, p);
     }
 
-    /// A repeat's window is two lengths from the beginning of the composition,
+    /// A repeat's window is two lengths from the beginning of the sequence,
     /// and it is saved with it: a loop the user set up is part of the project,
     /// not of the session that happened to be open.
     ///
     /// Written only when there *is* a window, so a project that loops the whole
-    /// composition — which is every project that has not been told otherwise —
+    /// sequence — which is every project that has not been told otherwise —
     /// is byte for byte the file it always was, and an older build, which skips
     /// keys it does not know, loads one that does and loops the whole thing.
     #[test]
@@ -875,7 +875,7 @@ mod tests {
         assert!(text.contains("repeat-from = 2000 none"), "{text}");
         assert_eq!(Project::parse(&text).expect("parses"), p);
 
-        // A file written before the keys existed reads as the whole composition,
+        // A file written before the keys existed reads as the whole sequence,
         // which is what those projects were played as: no start, and a stop of
         // zero, which the panel reads as the end.
         let old = "resynth-project 1\nname = X\ntempo = 120\n";
@@ -890,7 +890,7 @@ mod tests {
     #[test]
     fn a_path_needs_no_escaping() {
         let mut p = sample();
-        p.rows[1].source = TrackSource::Vst {
+        p.rows[1].source = InstrumentSource::Vst {
             path: PathBuf::from("/opt/vst3/weird = name (v2) [x86].so"),
             class_id: None,
             plugin_id: None,
@@ -983,26 +983,26 @@ mod tests {
     #[test]
     fn every_source_kind_round_trips() {
         for src in [
-            TrackSource::None,
-            TrackSource::LeSynthDefault,
-            TrackSource::LeSynth { file: "a b.lsft".to_string(), state: None },
-            TrackSource::LeSynth {
+            InstrumentSource::None,
+            InstrumentSource::LeSynthDefault,
+            InstrumentSource::LeSynth { file: "a b.lsft".to_string(), state: None },
+            InstrumentSource::LeSynth {
                 file: "a b.lsft".to_string(),
                 state: Some("a b.vststate".to_string()),
             },
-            TrackSource::Vst {
+            InstrumentSource::Vst {
                 path: PathBuf::from("/x/y.so"),
                 class_id: None,
                 plugin_id: None,
                 state: None,
             },
-            TrackSource::Vst {
+            InstrumentSource::Vst {
                 path: PathBuf::from("/x/y.so"),
                 class_id: Some([-1i8; 16]),
                 plugin_id: None,
                 state: None,
             },
-            TrackSource::Vst {
+            InstrumentSource::Vst {
                 path: PathBuf::from("/x/y.so"),
                 class_id: None,
                 plugin_id: None,
@@ -1010,19 +1010,19 @@ mod tests {
             },
             // A CLAP file holding several plugins, and an LV2 bundle: the
             // plugin inside rides on its own line, `=` and spaces and all.
-            TrackSource::Vst {
+            InstrumentSource::Vst {
                 path: PathBuf::from("/x/Surge XT.clap"),
                 class_id: None,
                 plugin_id: Some("org.surge-synth-team.surge-xt".to_string()),
                 state: Some("Surge XT.vststate".to_string()),
             },
-            TrackSource::Vst {
+            InstrumentSource::Vst {
                 path: PathBuf::from("/x/Kars.lv2"),
                 class_id: None,
                 plugin_id: Some("http://distrho.sf.net/plugins/Kars?a=b c".to_string()),
                 state: None,
             },
-            TrackSource::Wav { path: PathBuf::from("/x/a whole take.wav") },
+            InstrumentSource::Wav { path: PathBuf::from("/x/a whole take.wav") },
         ] {
             let mut p = sample();
             p.rows.truncate(1);
@@ -1032,19 +1032,19 @@ mod tests {
         }
     }
 
-    /// A project written before a LeSynth track kept its plugin state has no
+    /// A project written before a LeSynth instrument kept its plugin state has no
     /// `state =` line under `source = lesynth …`. It must still load — with the
     /// grid, and with the controls that drew it left at their defaults — rather
     /// than being refused or half-read.
     #[test]
     fn a_lesynth_row_without_a_state_line_still_loads() {
         let text = "resynth-project 1\nname = X\ntempo = 120\n\n[row]\n\
-                    track = LeSynth Fourier 1\nsource = lesynth voice.lsft\n\
+                    instrument = LeSynth Fourier 1\nsource = lesynth voice.lsft\n\
                     gain = 1\nlead = 0 none\n";
         let p = Project::parse(text).expect("parses");
         assert_eq!(
             p.rows[0].source,
-            TrackSource::LeSynth { file: "voice.lsft".to_string(), state: None }
+            InstrumentSource::LeSynth { file: "voice.lsft".to_string(), state: None }
         );
     }
 
@@ -1069,7 +1069,7 @@ mod tests {
         }
     }
 
-    /// Two tracks may share a name; their grids may not share a file.
+    /// Two instruments may share a name; their grids may not share a file.
     #[test]
     fn grid_file_names_do_not_collide() {
         let mut taken = Vec::new();
@@ -1105,8 +1105,8 @@ mod folder_tests {
             repeat_to: Duration::new(0, Fraction::None),
             rows: vec![ProjectRow {
                 name: "Voice row".to_string(),
-                track_name: "Voice".to_string(),
-                source: TrackSource::LeSynth { file: "Voice.lsft".to_string(), state: None },
+                instrument_name: "Voice".to_string(),
+                source: InstrumentSource::LeSynth { file: "Voice.lsft".to_string(), state: None },
                 gain: 1.0,
                 lead: Duration::new(0, Fraction::None),
                 enabled: true,
@@ -1146,8 +1146,8 @@ mod folder_tests {
             repeat_to: Duration::new(0, Fraction::None),
             rows: vec![ProjectRow {
                 name: "Voice row".to_string(),
-                track_name: "Voice".to_string(),
-                source: TrackSource::LeSynth { file: "Voice.lsft".to_string(), state: None },
+                instrument_name: "Voice".to_string(),
+                source: InstrumentSource::LeSynth { file: "Voice.lsft".to_string(), state: None },
                 gain: 1.0,
                 lead: Duration::new(0, Fraction::None),
                 enabled: true,
@@ -1162,7 +1162,7 @@ mod folder_tests {
         let wanted = back.rows[0].source.required_path(&dir).unwrap();
         assert!(!wanted.exists());
         assert_eq!(back.rows[0].source.describe(), "Voice.lsft");
-        assert_eq!(back.rows[0].track_name, "Voice");
+        assert_eq!(back.rows[0].instrument_name, "Voice");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -1171,7 +1171,7 @@ mod folder_tests {
     /// help — the plugin is not ours to have copied into the folder.
     #[test]
     fn a_missing_vst_names_its_path() {
-        let src = TrackSource::Vst {
+        let src = InstrumentSource::Vst {
             path: PathBuf::from("/nowhere/plugin.so"),
             class_id: None,
             plugin_id: None,
@@ -1181,10 +1181,10 @@ mod folder_tests {
         assert!(src.describe().contains("plugin.so"));
     }
 
-    fn row_with(source: TrackSource) -> ProjectRow {
+    fn row_with(source: InstrumentSource) -> ProjectRow {
         ProjectRow {
             name: String::new(),
-            track_name: "T".to_string(),
+            instrument_name: "T".to_string(),
             source,
             gain: 1.0,
             lead: Duration::new(0, Fraction::None),
@@ -1210,7 +1210,7 @@ mod folder_tests {
         let present = dir.join("present.wav");
         fs::write(&present, b"").unwrap();
 
-        let vst = |path: &str| TrackSource::Vst {
+        let vst = |path: &str| InstrumentSource::Vst {
             path: PathBuf::from(path),
             class_id: None,
             plugin_id: None,
@@ -1222,10 +1222,10 @@ mod folder_tests {
             repeat_from: Duration::new(0, Fraction::None),
             repeat_to: Duration::new(0, Fraction::None),
             rows: vec![
-                row_with(TrackSource::Wav { path: PathBuf::from("/home/other/ReSynthRecordings/take.wav") }),
+                row_with(InstrumentSource::Wav { path: PathBuf::from("/home/other/ReSynthRecordings/take.wav") }),
                 row_with(vst("/home/other/.vst3/Drums.vst3")),
-                row_with(TrackSource::Wav { path: present.clone() }),
-                row_with(TrackSource::Wav { path: PathBuf::from("/home/other/lost.wav") }),
+                row_with(InstrumentSource::Wav { path: present.clone() }),
+                row_with(InstrumentSource::Wav { path: PathBuf::from("/home/other/lost.wav") }),
                 // A wav is not looked for among plugins, nor a plugin among wavs.
                 row_with(vst("/home/other/take.wav")),
             ],
@@ -1233,10 +1233,10 @@ mod folder_tests {
         let moved = p.relocate_missing(&[recordings.clone()], &[plugins.clone()]);
 
         assert_eq!(moved.len(), 2, "{moved:?}");
-        assert_eq!(p.rows[0].source, TrackSource::Wav { path: recordings.join("take.wav") });
+        assert_eq!(p.rows[0].source, InstrumentSource::Wav { path: recordings.join("take.wav") });
         assert_eq!(p.rows[1].source, vst(&plugins.join("Vendor/Drums.vst3").display().to_string()));
-        assert_eq!(p.rows[2].source, TrackSource::Wav { path: present });
-        assert_eq!(p.rows[3].source, TrackSource::Wav { path: PathBuf::from("/home/other/lost.wav") });
+        assert_eq!(p.rows[2].source, InstrumentSource::Wav { path: present });
+        assert_eq!(p.rows[3].source, InstrumentSource::Wav { path: PathBuf::from("/home/other/lost.wav") });
         assert_eq!(p.rows[4].source, vst("/home/other/take.wav"));
 
         let _ = fs::remove_dir_all(&dir);
@@ -1288,7 +1288,7 @@ mod folder_tests {
             tempo_bpm: 100.0,
             repeat_from: Duration::new(0, Fraction::None),
             repeat_to: Duration::new(0, Fraction::None),
-            rows: vec![row_with(TrackSource::Wav { path: a.clone() })],
+            rows: vec![row_with(InstrumentSource::Wav { path: a.clone() })],
         };
         p.write(&project.join(format!("Song.{EXTENSION}"))).unwrap();
         fs::remove_dir_all(&elsewhere).unwrap();
@@ -1296,7 +1296,7 @@ mod folder_tests {
         fs::rename(&project, &moved).unwrap();
         p = Project::read(&moved.join(format!("Song.{EXTENSION}"))).unwrap();
         p.resolve_audio(&moved);
-        let TrackSource::Wav { path } = &p.rows[0].source else { panic!() };
+        let InstrumentSource::Wav { path } = &p.rows[0].source else { panic!() };
         assert_eq!(fs::read(path).unwrap(), b"first take");
 
         let _ = fs::remove_dir_all(&dir);
@@ -1306,7 +1306,7 @@ mod folder_tests {
     /// component registry is what finds it, by the codes in its id.
     #[test]
     fn an_audio_unit_needs_no_file() {
-        let src = TrackSource::Vst {
+        let src = InstrumentSource::Vst {
             path: PathBuf::from(crate::plugin::AU_PATH),
             class_id: None,
             plugin_id: Some("au:aumu:dls :appl".to_string()),

@@ -17,7 +17,7 @@
 //! trip, and what it sounds like playing a chord.
 //!
 //! This is the tool to reach for when a third-party plugin "does not open": it
-//! prints the same error the Tracks panel would show, with nothing else in the
+//! prints the same error the Instruments panel would show, with nothing else in the
 //! way. `plugin_probe --list` prints every plugin the picker would offer.
 //!
 //! Modes, after the path:
@@ -25,7 +25,7 @@
 //!   * `--render <out.wav>` — also write the chord it rendered to a file.
 //!   * `--keys <60,64,67>` — play these keys instead of the C major chord.
 //!   * `--editor [seconds]` — open the plugin's editor window, with an audio
-//!     stream behind it, the way the Tracks panel does, and close it again.
+//!     stream behind it, the way the Instruments panel does, and close it again.
 //!   * `--window [seconds]` / `--audio [seconds]` — only one half of that,
 //!     which is how a crash in teardown is narrowed down to one of them.
 
@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use resynth_studio::audio::{write_wav_f32, AudioEngine};
 use resynth_studio::gui::editor_window::open_editor_in_thread;
-use resynth_studio::gui::track::EditorInstance;
+use resynth_studio::gui::instrument::EditorInstance;
 use resynth_studio::midi::new_midi_queue;
 use resynth_studio::plugin::{detect_format, scan_installed, BlockProcessor, PluginInstance};
 
@@ -95,7 +95,7 @@ fn main() {
     };
     println!("loaded:   '{}'", plugin.name());
 
-    // The device's own format, exactly as the Tracks panel does it: a plugin set
+    // The device's own format, exactly as the Instruments panel does it: a plugin set
     // up for a smaller block than the stream later hands it writes past the
     // buffers it sized, which looks like a crash in the host. With no device
     // (a container, a test box) a common format stands in.
@@ -234,7 +234,7 @@ fn render_chord(
     Ok((out, channels))
 }
 
-/// Every plugin the Tracks panel's picker would offer.
+/// Every plugin the Instruments panel's picker would offer.
 fn list() {
     let (found, searched) = scan_installed();
     for dir in &searched {

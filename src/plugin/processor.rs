@@ -13,7 +13,7 @@
 // limitations under the License.
 //! Driving a plugin's audio, one block at a time, whatever its format.
 //!
-//! The track editor's audio stream and the Composer's mix both do the same
+//! The instrument editor's audio stream and the Sequencer's mix both do the same
 //! thing to a plugin every block: hand it the notes due in the block, let it
 //! render into buffers laid out the way it negotiated, and read its main output
 //! back. [`BlockProcessor`] is that, once. Everything it needs is allocated when

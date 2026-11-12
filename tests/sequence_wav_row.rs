@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! A **wav row**, end to end through the composition renderer: a Track that is
+//! A **wav row**, end to end through the sequence renderer: an Instrument that is
 //! an audio file, played from its start for the length of the note it is given.
 //!
 //! Rendered offline through the same voices and the same mix the transport uses,
@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 
 use resynth_studio::audio::write_wav_f32;
-use resynth_studio::gui::composer::player::{render_offline, PlannedNote, RowPlan};
+use resynth_studio::gui::sequencer::player::{render_offline, PlannedNote, RowPlan};
 use resynth_studio::gui::registry::PlaybackSource;
 
 /// The release the renderer plays past the last note-off, from `player`.
@@ -41,7 +41,7 @@ fn ramp() -> Vec<f32> {
 fn wav_source(path: &PathBuf) -> PlaybackSource {
     PlaybackSource {
         name: "take.wav".to_string(),
-        // A wav track has no library; its path is the file it plays.
+        // A wav instrument has no library; its path is the file it plays.
         plugin_path: path.clone(),
         class_id: None,
         plugin_id: None,
@@ -81,7 +81,7 @@ fn a_wav_row_renders_the_file_under_every_note() {
     // The written length: the last note-off plus the tail the renderer plays on
     // for. A wav row has no release, but it is mixed with rows that do.
     let expected = ((1.5 + 0.25 + TAIL_SECS) * RATE).round() as usize;
-    assert_eq!(out.len(), expected, "the render is not the composition's length");
+    assert_eq!(out.len(), expected, "the render is not the sequence's length");
 
     let at = |secs: f64| (secs * RATE).round() as usize;
     // Silence where the row is silent — before the first note, between the two,
@@ -169,7 +169,7 @@ fn a_note_plays_the_file_from_where_its_start_points() {
     let _ = std::fs::remove_file(&path);
 }
 
-/// A file that is not there must not take the composition with it: the row is
+/// A file that is not there must not take the sequence with it: the row is
 /// dropped, the rest plays, and the caller is told how many rows made it.
 #[test]
 fn a_missing_file_leaves_the_row_out_rather_than_failing_the_render() {

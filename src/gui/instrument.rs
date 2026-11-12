@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! Instrument tracks — a hosted plugin with an open/close editor, but no
+//! Plugin instruments — a hosted plugin with an open/close editor, but no
 //! audio-file analysis. Two flavours are offered:
 //!
 //!   * **LeSynth Fourier** — the embedded internal plugin, opened in its plain
@@ -20,7 +20,7 @@
 //!     macOS, Audio Unit), picked in [`PluginBrowser`] from the plugins
 //!     installed on this machine or browsed for by hand.
 //!
-//! A track is lightweight metadata (name + plugin path); the heavy plugin
+//! An instrument is lightweight metadata (name + plugin path); the heavy plugin
 //! instance, its audio stream and its editor window live in [`EditorInstance`]
 //! and exist only while the editor is open — closing the window tears them all
 //! down, matching the resynth subtrack editors.
@@ -34,9 +34,9 @@ use anyhow::{Context, Result};
 use eframe::egui;
 
 use super::editor_window::{open_editor_in_thread, EditorHandle};
-use super::registry::TrackRegistry;
+use super::registry::InstrumentRegistry;
 use crate::audio::AudioEngine;
-use crate::midi::{MidiEventQueue, MidiFeed, MidiRouter};
+use crate::midi::{KeyboardTarget, MidiEventQueue, MidiFeed, MidiRouter};
 use crate::track_format::TrackState;
 use crate::midi::plays_a_drum_kit;
 use crate::plugin::{scan_installed, FoundPlugin, PluginFormat, PluginInstance};
@@ -78,7 +78,7 @@ impl EditorInstance {
         let engine = match AudioEngine::start(plugin.clone(), midi_queue) {
             Ok(e) => Some(e),
             Err(e) => {
-                log::warn!("Track audio start failed: {e:#}");
+                log::warn!("Instrument audio start failed: {e:#}");
                 None
             }
         };
@@ -109,9 +109,9 @@ impl EditorInstance {
         self._plugin.export_state()
     }
 
-    /// The instance behind this editor, for the track registry to hold weakly —
-    /// that is how the Composer plays the grid as it is being edited rather than
-    /// the one the track was registered with.
+    /// The instance behind this editor, for the instrument registry to hold weakly —
+    /// that is how the Sequencer plays the grid as it is being edited rather than
+    /// the one the instrument was registered with.
     pub fn plugin(&self) -> &Arc<PluginInstance> {
         &self._plugin
     }
@@ -140,24 +140,24 @@ impl Drop for EditorInstance {
     }
 }
 
-/// Track flavour. Only LeSynth tracks carry the harmonic grid that can be
-/// exported/imported; custom plugin tracks are create-only.
+/// Instrument flavour. Only LeSynth instruments carry the harmonic grid that can be
+/// exported/imported; custom plugin instruments are create-only.
 #[derive(Clone, Copy, PartialEq)]
-enum TrackKind {
+enum InstrumentKind {
     LeSynth,
     CustomVst,
 }
 
-/// One instrument track: persistent metadata plus its editor while open.
-struct PluginTrack {
-    /// Stable id, used to key per-track egui widget state across frames.
+/// One plugin instrument: persistent metadata plus its editor while open.
+struct PluginInstrument {
+    /// Stable id, used to key per-instrument egui widget state across frames.
     id: u64,
-    /// This track's id in the shared [`TrackRegistry`], where the Composer finds
+    /// This instrument's id in the shared [`InstrumentRegistry`], where the Sequencer finds
     /// it. Distinct from `id`, which is local to this panel.
     registry_id: u64,
     /// Display name (the plugin kind, or the chosen `.so` file name).
     name: String,
-    kind: TrackKind,
+    kind: InstrumentKind,
     /// Library to (re)load whenever the editor is opened.
     plugin_path: PathBuf,
     /// Class ID to select from the factory; `None` takes the first class.
@@ -166,35 +166,35 @@ struct PluginTrack {
     /// several (or an Audio Unit's codes); `None` takes the first.
     plugin_id: Option<String>,
     /// A saved grid to push into the instance when its editor is opened (set for
-    /// tracks created via "Load LeSynth Fourier Track").
+    /// instruments created via "Load LeSynth Fourier Instrument").
     import_state: Option<TrackState>,
     /// The same for a custom plugin: its own saved state, which is where it
     /// keeps the knobs the user set. Captured when the editor closes and restored
-    /// when it opens, so the sound survives the window and reaches the Composer.
+    /// when it opens, so the sound survives the window and reaches the Sequencer.
     vst_state: Option<Vec<u8>>,
-    /// Which keyboard plays this track, by port name. `None` follows whatever
-    /// the MIDI panel is connected to, which is what every track does until it
+    /// Which keyboard plays this instrument, by port name. `None` follows whatever
+    /// the MIDI panel is connected to, which is what every instrument does until it
     /// is pointed somewhere else.
     midi_source: Option<String>,
-    /// This track's own feed from the router, made when its editor first opens
+    /// This instrument's own feed from the router, made when its editor first opens
     /// and kept afterwards so changing the source does not mean restarting the
     /// audio engine draining it.
     feed: Option<MidiFeed>,
     editor: Option<EditorInstance>,
 }
 
-impl PluginTrack {
+impl PluginInstrument {
     /// Load the plugin, initialise it at the output device's format and open its
     /// editor. Idempotent: does nothing if the editor is already open. LeSynth
-    /// tracks are tagged with a token (so their grid can be exported), and if the
-    /// track carries an `import_state` it is pushed in before the window opens —
+    /// instruments are tagged with a token (so their grid can be exported), and if the
+    /// instrument carries an `import_state` it is pushed in before the window opens —
     /// otherwise LeSynth stays in its plain synth mode (no `push_analysis`).
     fn open_editor(&mut self, router: &MidiRouter) -> Result<()> {
         if self.editor.is_some() {
             return Ok(());
         }
         // Only LeSynth instances support the state export/import C ABI.
-        let token = (self.kind == TrackKind::LeSynth).then(next_instance_token);
+        let token = (self.kind == InstrumentKind::LeSynth).then(next_instance_token);
         let inst = Arc::new(PluginInstance::load(
             &self.plugin_path,
             self.class_id.as_ref(),
@@ -207,7 +207,7 @@ impl PluginTrack {
         // knobs the user left rather than the plugin's defaults.
         if let Some(bytes) = &self.vst_state {
             if let Err(e) = inst.restore_state(bytes) {
-                log::warn!("Track state restore failed: {e:#}");
+                log::warn!("Instrument state restore failed: {e:#}");
             }
         }
 
@@ -219,12 +219,12 @@ impl PluginTrack {
         // Push a loaded grid (Analysis mode) before the window renders it.
         if let Some(state) = &self.import_state {
             if let Err(e) = inst.import_state(state) {
-                log::warn!("Track import failed: {e:#}");
+                log::warn!("Instrument import failed: {e:#}");
             }
         }
 
-        // One feed per track, made once and kept: the engine drains the queue it
-        // was started with, so a track that changes keyboard changes what the
+        // One feed per instrument, made once and kept: the engine drains the queue it
+        // was started with, so an instrument that changes keyboard changes what the
         // router puts *into* that queue rather than which queue it is.
         let feed = match &self.feed {
             Some(feed) => feed.queue.clone(),
@@ -239,22 +239,22 @@ impl PluginTrack {
         Ok(())
     }
 
-    /// Whether this track's live grid can be exported (LeSynth, editor open).
+    /// Whether this instrument's live grid can be exported (LeSynth, editor open).
     fn can_export(&self) -> bool {
-        self.kind == TrackKind::LeSynth && self.editor.is_some()
+        self.kind == InstrumentKind::LeSynth && self.editor.is_some()
     }
 
-    /// Take what the open editor is playing and keep it on the track, so closing
+    /// Take what the open editor is playing and keep it on the instrument, so closing
     /// the window does not throw the user's edits away.
     ///
-    /// Without this the Composer would fall back to the state the track was
+    /// Without this the Sequencer would fall back to the state the instrument was
     /// registered with the moment an editor closed — the plugin's defaults, for
     /// a custom plugin whose knobs had just been set by hand.
-    fn capture_editor_state(&mut self, registry: &TrackRegistry) {
+    fn capture_editor_state(&mut self, registry: &InstrumentRegistry) {
         let Some(editor) = &self.editor else { return };
-        if let TrackKind::LeSynth = self.kind {
+        if let InstrumentKind::LeSynth = self.kind {
             // An instance in plain synth mode has no grid to export; that is
-            // not a failure, it is a track with nothing to remember.
+            // not a failure, it is an instrument with nothing to remember.
             if let Ok(state) = editor.export_state() {
                 registry.set_state(self.registry_id, Some(state.clone()));
                 self.import_state = Some(state);
@@ -264,7 +264,7 @@ impl PluginTrack {
         // LeSynth that is where the whole Synth editor lives: the curve type,
         // offset and granularity of each harmonic, and the nested-Fourier
         // sliders under them. The grid says what the curves *are*; this says
-        // what drew them, and without it reopening the track shows a correct
+        // what drew them, and without it reopening the instrument shows a correct
         // picture over controls that all read zero.
         match editor.plugin().save_state() {
             Ok(bytes) if !bytes.is_empty() => {
@@ -278,7 +278,7 @@ impl PluginTrack {
 
     /// Drop the editor if its window was closed directly, freeing the instance —
     /// keeping what it was playing first.
-    fn reap_editor(&mut self, registry: &TrackRegistry) {
+    fn reap_editor(&mut self, registry: &InstrumentRegistry) {
         if self.editor.as_ref().is_some_and(EditorInstance::is_closed) {
             self.capture_editor_state(registry);
             self.editor = None;
@@ -315,12 +315,12 @@ impl PluginBrowser {
     }
 }
 
-/// Whether this plugin plays a drum kit, so the Composer can name its notes.
+/// Whether this plugin plays a drum kit, so the Sequencer can name its notes.
 ///
 /// Asks the plugin first — its VST3 subcategories are the precise answer — and
 /// falls back to the name, which is what catches the many that declare
 /// themselves a plain instrument. The scan opens the module and closes it again;
-/// if that fails the track is still perfectly usable, so the name alone decides.
+/// if that fails the instrument is still perfectly usable, so the name alone decides.
 fn is_a_drum_kit(path: &std::path::Path, plugin_id: Option<&str>, name: &str) -> bool {
     match crate::plugin::describe(path, plugin_id) {
         Some((own_name, categories)) => {
@@ -335,39 +335,94 @@ pub fn vst3_search_paths() -> Vec<PathBuf> {
     crate::plugin::search_paths(PluginFormat::Vst3)
 }
 
-/// The Tracks panel: the "add" buttons and the list of instrument tracks.
-pub struct TracksPanel {
-    tracks: Vec<PluginTrack>,
+/// The Instruments panel: the "add" buttons and the list of plugin instruments.
+pub struct InstrumentsPanel {
+    instruments: Vec<PluginInstrument>,
     next_id: u64,
     status: String,
     /// The custom-VST picker, while it is open.
     browser: Option<PluginBrowser>,
-    /// Where a track's keyboard feed comes from — one queue per instance, so two
+    /// Where an instrument's keyboard feed comes from — one queue per instance, so two
     /// open editors both hear everything instead of splitting the stream.
     midi_router: MidiRouter,
-    /// The app-wide track list the Composer draws its rows from. Every track
+    /// The one instrument the MIDI panel's keyboard plays, by instrument id, or
+    /// `None` for every instrument following the panel's port.
+    keyboard_target: Option<u64>,
+    /// The app-wide instrument list the Sequencer draws its rows from. Every instrument
     /// created here is registered, and removed from it when it goes.
-    registry: TrackRegistry,
+    registry: InstrumentRegistry,
 }
 
-impl TracksPanel {
-    pub fn new(midi_router: MidiRouter, registry: TrackRegistry) -> Self {
+impl InstrumentsPanel {
+    pub fn new(midi_router: MidiRouter, registry: InstrumentRegistry) -> Self {
         Self {
-            tracks: Vec::new(),
+            instruments: Vec::new(),
             next_id: 0,
-            status: "Add a LeSynth Fourier or custom plugin track.".to_string(),
+            status: "Add a LeSynth Fourier or custom plugin instrument.".to_string(),
             browser: None,
             midi_router,
+            keyboard_target: None,
             registry,
         }
+    }
+
+    /// The instruments the MIDI panel's keyboard can be given to: id and name.
+    pub fn keyboard_choices(&self) -> Vec<(u64, String)> {
+        self.instruments.iter().map(|i| (i.id, i.name.clone())).collect()
+    }
+
+    /// The instrument the MIDI panel's keyboard plays; `None` is all of them.
+    pub fn keyboard_target(&self) -> Option<u64> {
+        self.keyboard_target
+    }
+
+    /// Give the MIDI panel's keyboard to one instrument, or back to all of them.
+    ///
+    /// An instrument only sounds through its open editor, so picking one opens
+    /// it: a keyboard pointed at a closed instrument would play nothing.
+    pub fn set_keyboard_target(&mut self, target: Option<u64>) {
+        self.keyboard_target = target;
+        let router = self.midi_router.clone();
+        if let Some(instrument) =
+            self.instruments.iter_mut().find(|i| Some(i.id) == target)
+        {
+            self.status = match instrument.open_editor(&router) {
+                Ok(()) => format!("The MIDI keyboard now plays {}.", instrument.name),
+                Err(e) => format!("Open editor failed: {e:#}"),
+            };
+        } else if target.is_none() {
+            self.status = "The MIDI keyboard plays every open instrument.".to_string();
+        }
+        self.sync_keyboard_target();
+    }
+
+    /// Tell the router who the choice is. Every frame: the chosen instrument's
+    /// feed appears when its editor first opens, and the instrument itself may
+    /// be removed — the keyboard then goes back to everything rather than
+    /// staying on something that no longer exists.
+    pub fn sync_keyboard_target(&mut self) {
+        let target = match self.keyboard_target {
+            None => KeyboardTarget::Everyone,
+            Some(id) => match self.instruments.iter().find(|i| i.id == id) {
+                Some(instrument) => match &instrument.feed {
+                    Some(feed) => KeyboardTarget::Feed(feed.id),
+                    None => KeyboardTarget::Nobody,
+                },
+                None => {
+                    self.keyboard_target = None;
+                    KeyboardTarget::Everyone
+                }
+            },
+        };
+        self.midi_router.set_default_target(target);
     }
 
     fn internal_plugin_path() -> Option<PathBuf> {
         crate::internal_plugin_path()
     }
 
-    /// Add a LeSynth Fourier track (internal plugin, plain synth mode).
-    fn add_lesynth_track(&mut self) {
+    /// Add a LeSynth Fourier instrument (internal plugin, plain synth mode).
+    fn add_lesynth_instrument(&mut self) {
         let Some(path) = Self::internal_plugin_path() else {
             self.status = "Could not locate the internal plugin.".to_string();
             return;
@@ -377,15 +432,15 @@ impl TracksPanel {
             return;
         }
         let id = self.take_id();
-        let name = unique_track_name(&format!("LeSynth Fourier {}", id + 1));
+        let name = unique_instrument_name(&format!("LeSynth Fourier {}", id + 1));
         let registry_id =
             self.registry
                 .add(&name, path.clone(), Some(class_ids::FOURIER_SYNTH), true, None);
-        self.tracks.push(PluginTrack {
+        self.instruments.push(PluginInstrument {
             id,
             registry_id,
             name,
-            kind: TrackKind::LeSynth,
+            kind: InstrumentKind::LeSynth,
             plugin_path: path,
             class_id: Some(class_ids::FOURIER_SYNTH),
             plugin_id: None,
@@ -395,24 +450,24 @@ impl TracksPanel {
             feed: None,
             editor: None,
         });
-        self.status = "Created LeSynth Fourier track.".to_string();
+        self.status = "Created LeSynth Fourier instrument.".to_string();
     }
 
-    /// Add a custom plugin track for `path` — a bundle or a bare library, of
+    /// Add a custom plugin instrument for `path` — a bundle or a bare library, of
     /// any format — and `plugin_id` inside it, named `name` if the picker knew
     /// what the plugin is called.
     ///
     /// The plugin is checked here rather than when its editor is opened: a file
     /// that is not a plugin, or one whose dependencies the loader cannot
     /// satisfy, should say so while the user is still looking at the picker.
-    fn add_custom_plugin_track(
+    fn add_custom_plugin_instrument(
         &mut self,
         path: PathBuf,
         plugin_id: Option<String>,
         name: Option<String>,
     ) -> Result<()> {
         let format = crate::plugin::validate(&path, plugin_id.as_deref())?;
-        // Name the track after the bundle, not the library inside it: "Dexed"
+        // Name the instrument after the bundle, not the library inside it: "Dexed"
         // rather than "Dexed.so", and never "libsomething.so".
         let name = name.unwrap_or_else(|| crate::plugin::display_stem(&path));
         // With no class id the first audio-module class in a VST3 factory is
@@ -424,11 +479,11 @@ impl TracksPanel {
             is_a_drum_kit(&path, plugin_id.as_deref(), &name),
         );
         let id = self.take_id();
-        self.tracks.push(PluginTrack {
+        self.instruments.push(PluginInstrument {
             id,
             registry_id,
             name: name.clone(),
-            kind: TrackKind::CustomVst,
+            kind: InstrumentKind::CustomVst,
             plugin_path: path,
             class_id: None,
             plugin_id,
@@ -438,7 +493,7 @@ impl TracksPanel {
             feed: None,
             editor: None,
         });
-        self.status = format!("Created {} track '{name}'.", format.label());
+        self.status = format!("Created {} instrument '{name}'.", format.label());
         Ok(())
     }
 
@@ -573,7 +628,7 @@ impl TracksPanel {
             });
 
         if let Some((path, plugin_id, name)) = chosen {
-            match self.add_custom_plugin_track(path, plugin_id, name) {
+            match self.add_custom_plugin_instrument(path, plugin_id, name) {
                 Ok(()) => close = true,
                 // Stay open with the reason on screen — the user is most likely
                 // to want to pick something else straight away.
@@ -589,10 +644,10 @@ impl TracksPanel {
         }
     }
 
-    /// Adopt a LeSynth Fourier track from an already-parsed grid — what loading a
+    /// Adopt a LeSynth Fourier instrument from an already-parsed grid — what loading a
     /// project does for every row that plays one. Returns its registry id.
     ///
-    /// `state` is `None` for a plain synth-mode track (no grid to import).
+    /// `state` is `None` for a plain synth-mode instrument (no grid to import).
     /// `vst_state` is the plugin's own saved state, which is where everything
     /// *beside* the grid lives — the curve type, offset and granularity of every
     /// harmonic, and the nested-Fourier sliders under them. The grid alone
@@ -615,11 +670,11 @@ impl TracksPanel {
             state.clone(),
         );
         self.registry.set_vst_state(registry_id, vst_state.clone());
-        self.tracks.push(PluginTrack {
+        self.instruments.push(PluginInstrument {
             id,
             registry_id,
             name: name.to_string(),
-            kind: TrackKind::LeSynth,
+            kind: InstrumentKind::LeSynth,
             plugin_path: path,
             class_id: Some(class_ids::FOURIER_SYNTH),
             plugin_id: None,
@@ -632,9 +687,9 @@ impl TracksPanel {
         Ok(registry_id)
     }
 
-    /// Adopt a custom plugin track by path — the other half of loading a
+    /// Adopt a custom plugin instrument by path — the other half of loading a
     /// project. `vst_state` is the plugin's own saved state from the project,
-    /// restored into every instance the track loads.
+    /// restored into every instance the instrument loads.
     pub fn adopt_vst(
         &mut self,
         name: &str,
@@ -654,11 +709,11 @@ impl TracksPanel {
             registry_id,
             is_a_drum_kit(&path, plugin_id.as_deref(), name),
         );
-        self.tracks.push(PluginTrack {
+        self.instruments.push(PluginInstrument {
             id,
             registry_id,
             name: name.to_string(),
-            kind: TrackKind::CustomVst,
+            kind: InstrumentKind::CustomVst,
             plugin_path: path,
             class_id,
             plugin_id,
@@ -671,20 +726,20 @@ impl TracksPanel {
         Ok(registry_id)
     }
 
-    /// Drop every track and its editor — what loading a project does before it
+    /// Drop every instrument and its editor — what loading a project does before it
     /// adopts the project's own.
     pub fn clear(&mut self) {
-        for track in self.tracks.drain(..) {
-            self.registry.remove(track.registry_id);
+        for instrument in self.instruments.drain(..) {
+            self.registry.remove(instrument.registry_id);
         }
         self.status = "Cleared for a loaded project.".to_string();
     }
 
-    /// Load a saved `.lsft` LeSynth track: pick the file, parse it, and add a
-    /// LeSynth track whose grid is pushed into the instance when its editor opens.
-    fn load_lesynth_track(&mut self) {
+    /// Load a saved `.lsft` LeSynth instrument: pick the file, parse it, and add a
+    /// LeSynth instrument whose grid is pushed into the instance when its editor opens.
+    fn load_lesynth_instrument(&mut self) {
         let Some(file) = rfd::FileDialog::new()
-            .add_filter("LeSynth Fourier track (.lsft)", &["lsft"])
+            .add_filter("LeSynth Fourier instrument (.lsft)", &["lsft"])
             .add_filter("All files", &["*"])
             .pick_file()
         else {
@@ -705,14 +760,14 @@ impl TracksPanel {
             self.status = format!("Internal plugin {} not found.", crate::file_label(&plugin_path));
             return;
         }
-        let name = unique_track_name(
+        let name = unique_instrument_name(
             &file
                 .file_stem()
                 .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "LeSynth track".to_string()),
+                .unwrap_or_else(|| "LeSynth instrument".to_string()),
         );
         let id = self.take_id();
-        // The saved grid is registered with the track, so the Composer can play
+        // The saved grid is registered with the instrument, so the Sequencer can play
         // it without the editor ever being opened.
         let registry_id = self.registry.add(
             &name,
@@ -721,11 +776,11 @@ impl TracksPanel {
             true,
             Some(state.clone()),
         );
-        self.tracks.push(PluginTrack {
+        self.instruments.push(PluginInstrument {
             id,
             registry_id,
             name,
-            kind: TrackKind::LeSynth,
+            kind: InstrumentKind::LeSynth,
             plugin_path,
             class_id: Some(class_ids::FOURIER_SYNTH),
             plugin_id: None,
@@ -735,14 +790,14 @@ impl TracksPanel {
             feed: None,
             editor: None,
         });
-        self.status = "Loaded LeSynth track — open its editor to view.".to_string();
+        self.status = "Loaded LeSynth instrument — open its editor to view.".to_string();
     }
 
-    /// Save a track's live grid to a chosen `.lsft` file.
-    fn export_track(&mut self, idx: usize) {
-        // Snapshot first (ends the borrow of `self.tracks` before the dialog).
+    /// Save an instrument's live grid to a chosen `.lsft` file.
+    fn export_instrument(&mut self, idx: usize) {
+        // Snapshot first (ends the borrow of `self.instruments` before the dialog).
         let snapshot = self
-            .tracks
+            .instruments
             .get(idx)
             .filter(|t| t.can_export())
             .map(|t| (t.name.clone(), t.editor.as_ref().unwrap().export_state()));
@@ -757,7 +812,7 @@ impl TracksPanel {
             }
         };
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("LeSynth Fourier track (.lsft)", &["lsft"])
+            .add_filter("LeSynth Fourier instrument (.lsft)", &["lsft"])
             .set_file_name(format!("{name}.lsft"))
             .save_file()
         else {
@@ -777,11 +832,11 @@ impl TracksPanel {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("➕ Create LeSynth Fourier Track").clicked() {
-                self.add_lesynth_track();
+            if ui.button("➕ Create LeSynth Fourier Instrument").clicked() {
+                self.add_lesynth_instrument();
             }
             if ui
-                .button("➕ Create Custom Plugin Track")
+                .button("➕ Create Custom Plugin Instrument")
                 .on_hover_text(if cfg!(target_os = "macos") {
                     "Pick an installed VST3, CLAP, VST2, LV2 or Audio Unit, or browse for one"
                 } else {
@@ -792,21 +847,21 @@ impl TracksPanel {
                 self.browser = Some(PluginBrowser::scan());
             }
             if ui
-                .button("➕ Load LeSynth Fourier Track")
-                .on_hover_text("Open a saved .lsft track")
+                .button("➕ Load LeSynth Fourier Instrument")
+                .on_hover_text("Open a saved .lsft instrument")
                 .clicked()
             {
-                self.load_lesynth_track();
+                self.load_lesynth_instrument();
             }
         });
         // Before the early return below: the picker is a window of its own and
-        // has to be drawn whether or not there are any tracks yet.
+        // has to be drawn whether or not there are any instruments yet.
         self.browser_ui(ui.ctx());
 
         ui.add_space(4.0);
         ui.label(egui::RichText::new(&self.status).color(egui::Color32::from_gray(170)));
 
-        if self.tracks.is_empty() {
+        if self.instruments.is_empty() {
             return;
         }
         ui.add_space(6.0);
@@ -815,17 +870,17 @@ impl TracksPanel {
 
         // Reap editors the user closed directly, so button state and resources
         // stay honest, and keep the registry's view of which instances are live
-        // in step with them — that is what lets the Composer play a grid the
+        // in step with them — that is what lets the Sequencer play a grid the
         // user is editing right now.
-        for track in &mut self.tracks {
-            track.reap_editor(&self.registry);
+        for instrument in &mut self.instruments {
+            instrument.reap_editor(&self.registry);
             self.registry.set_live(
-                track.registry_id,
-                track.editor.as_ref().map(|e| Arc::downgrade(e.plugin())),
+                instrument.registry_id,
+                instrument.editor.as_ref().map(|e| Arc::downgrade(e.plugin())),
             );
         }
 
-        // Deferred actions, so we don't mutate a track while iterating.
+        // Deferred actions, so we don't mutate an instrument while iterating.
         enum Action {
             Open(usize),
             Close(usize),
@@ -838,20 +893,20 @@ impl TracksPanel {
         // asking the driver is not free, and every row offers the same answer.
         let ports = crate::midi::list_midi_ports().unwrap_or_default();
         let default_port = self.midi_router.default_port();
-        // Mutable: a row's keyboard picker writes straight into its track.
+        // Mutable: a row's keyboard picker writes straight into its instrument.
         let mut retarget: Option<(usize, Option<String>)> = None;
-        for (idx, track) in self.tracks.iter_mut().enumerate() {
-            // Scope widget ids by the stable track id, so buttons keep their
-            // identity when tracks above them are removed and indices shift.
-            ui.push_id(track.id, |ui| {
+        for (idx, instrument) in self.instruments.iter_mut().enumerate() {
+            // Scope widget ids by the stable instrument id, so buttons keep their
+            // identity when instruments above them are removed and indices shift.
+            ui.push_id(instrument.id, |ui| {
                 egui::Frame::new()
                     .fill(egui::Color32::from_gray(34))
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(&track.name).strong());
-                            if track.editor.is_some() {
+                            ui.label(egui::RichText::new(&instrument.name).strong());
+                            if instrument.editor.is_some() {
                                 ui.label(
                                     egui::RichText::new("● editor open")
                                         .color(egui::Color32::from_rgb(130, 230, 150)),
@@ -862,12 +917,12 @@ impl TracksPanel {
                                 |ui| {
                                     if ui
                                         .button("🗑 Remove")
-                                        .on_hover_text("Remove this track (closes its editor)")
+                                        .on_hover_text("Remove this instrument (closes its editor)")
                                         .clicked()
                                     {
                                         action = Some(Action::Remove(idx));
                                     }
-                                    if track.editor.is_some() {
+                                    if instrument.editor.is_some() {
                                         if ui.button("✖ Close editor").clicked() {
                                             action = Some(Action::Close(idx));
                                         }
@@ -875,10 +930,10 @@ impl TracksPanel {
                                         action = Some(Action::Open(idx));
                                     }
                                     // Export the live grid (LeSynth only, editor open).
-                                    if track.can_export()
+                                    if instrument.can_export()
                                         && ui
                                             .button("💾 Export…")
-                                            .on_hover_text("Save this track's grid to a .lsft file")
+                                            .on_hover_text("Save this instrument's grid to a .lsft file")
                                             .clicked()
                                     {
                                         action = Some(Action::Export(idx));
@@ -887,14 +942,14 @@ impl TracksPanel {
                             );
                         });
 
-                        // Which keyboard plays *this* instance. Each track has a
+                        // Which keyboard plays *this* instance. Each instrument has a
                         // feed of its own, so two open editors both hear
                         // everything their keyboard sends instead of taking
                         // turns at one queue — and a machine with two keyboards
                         // on it can play them into two instruments at once.
                         ui.horizontal(|ui| {
                             ui.label("MIDI in:");
-                            let mut want = track.midi_source.clone();
+                            let mut want = instrument.midi_source.clone();
                             let label = match &want {
                                 Some(port) => port.clone(),
                                 None => match &default_port {
@@ -902,7 +957,7 @@ impl TracksPanel {
                                     None => "default (not connected)".to_string(),
                                 },
                             };
-                            egui::ComboBox::from_id_salt(("midi_in", track.id, ports.len()))
+                            egui::ComboBox::from_id_salt(("midi_in", instrument.id, ports.len()))
                                 .width(300.0)
                                 .height(9.0 * 44.0)
                                 .selected_text(label)
@@ -922,7 +977,7 @@ impl TracksPanel {
                                 })
                                 .response
                                 .on_hover_text(
-                                    "The keyboard that plays this track's instance.\n\n\
+                                    "The keyboard that plays this instrument's instance.\n\n\
                                      Every instance has a feed of its own, so two open \
                                      editors both hear everything rather than splitting \
                                      one stream between them, and two keyboards can play \
@@ -931,7 +986,7 @@ impl TracksPanel {
                                      connected to. Takes effect on the next note — \
                                      nothing is reopened, and the audio keeps running.",
                                 );
-                            if want != track.midi_source {
+                            if want != instrument.midi_source {
                                 retarget = Some((idx, want));
                             }
                         });
@@ -943,16 +998,16 @@ impl TracksPanel {
         // Applied after the loop: pointing a feed somewhere else talks to the
         // router, which the rows above are still borrowing.
         if let Some((idx, want)) = retarget {
-            if let Some(track) = self.tracks.get_mut(idx) {
-                let feed_id = track.feed.as_ref().map(|f| f.id);
+            if let Some(instrument) = self.instruments.get_mut(idx) {
+                let feed_id = instrument.feed.as_ref().map(|f| f.id);
                 match feed_id.map_or(Ok(()), |id| self.midi_router.set_source(id, want.clone())) {
                     Ok(()) => {
-                        track.midi_source = want;
-                        // A track whose editor has never been opened has no feed
+                        instrument.midi_source = want;
+                        // An instrument whose editor has never been opened has no feed
                         // yet; the choice is remembered and used when it is.
-                        self.status = match &track.midi_source {
-                            Some(port) => format!("{} now plays from {port}.", track.name),
-                            None => format!("{} follows the MIDI panel's port.", track.name),
+                        self.status = match &instrument.midi_source {
+                            Some(port) => format!("{} now plays from {port}.", instrument.name),
+                            None => format!("{} follows the MIDI panel's port.", instrument.name),
                         };
                     }
                     Err(e) => self.status = format!("Could not switch MIDI source: {e:#}"),
@@ -966,30 +1021,30 @@ impl TracksPanel {
         match action {
             Some(Action::Open(idx)) => {
                 let router = self.midi_router.clone();
-                if let Some(track) = self.tracks.get_mut(idx) {
-                    if let Err(e) = track.open_editor(&router) {
+                if let Some(instrument) = self.instruments.get_mut(idx) {
+                    if let Err(e) = instrument.open_editor(&router) {
                         self.status = format!("Open editor failed: {e:#}");
-                    } else if track.editor.as_ref().is_some_and(|e| !e.is_audible()) {
+                    } else if instrument.editor.as_ref().is_some_and(|e| !e.is_audible()) {
                         self.status =
-                            format!("Opened {} — audio output unavailable.", track.name);
+                            format!("Opened {} — audio output unavailable.", instrument.name);
                     } else {
                         self.status = String::new();
                     }
                 }
             }
             Some(Action::Close(idx)) => {
-                if let Some(track) = self.tracks.get_mut(idx) {
-                    track.capture_editor_state(&self.registry);
-                    track.editor = None;
+                if let Some(instrument) = self.instruments.get_mut(idx) {
+                    instrument.capture_editor_state(&self.registry);
+                    instrument.editor = None;
                 }
             }
-            Some(Action::Export(idx)) => self.export_track(idx),
+            Some(Action::Export(idx)) => self.export_instrument(idx),
             Some(Action::Remove(idx)) => {
-                if idx < self.tracks.len() {
-                    // Nothing to capture: the track is going, and with it the
+                if idx < self.instruments.len() {
+                    // Nothing to capture: the instrument is going, and with it the
                     // registry entry any state would have been kept in.
-                    let removed = self.tracks.remove(idx);
-                    // Composer rows pointing here fall back to another track on
+                    let removed = self.instruments.remove(idx);
+                    // Sequencer rows pointing here fall back to another instrument on
                     // their next frame.
                     self.registry.remove(removed.registry_id);
                     self.status = format!("Removed {}.", removed.name);
@@ -1000,17 +1055,17 @@ impl TracksPanel {
     }
 }
 
-/// A track name nothing else can already be called: the readable part, then a
+/// An instrument name nothing else can already be called: the readable part, then a
 /// fresh UUID.
 ///
-/// Two LeSynth tracks with the same name are not a cosmetic problem. A saved
-/// project writes one `.lsft` per track named after the track, a row records
-/// which track it plays by that name, and the Composer's select boxes are read
+/// Two LeSynth instruments with the same name are not a cosmetic problem. A saved
+/// project writes one `.lsft` per instrument named after the instrument, a row records
+/// which instrument it plays by that name, and the Sequencer's select boxes are read
 /// by it — so a duplicate means a grid file quietly overwritten by another
-/// track's, and a row that cannot say which of the two it wanted. The counter in
+/// instrument's, and a row that cannot say which of the two it wanted. The counter in
 /// front of the UUID is what a person reads; the UUID is what makes the
 /// guarantee, including across projects and across machines.
-pub fn unique_track_name(stem: &str) -> String {
+pub fn unique_instrument_name(stem: &str) -> String {
     format!("{stem} · {}", uuid::Uuid::new_v4())
 }
 
@@ -1018,24 +1073,24 @@ pub fn unique_track_name(stem: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Two tracks made the same way must never be called the same thing: a
-    /// saved project names each grid file after its track, so a duplicate is a
-    /// grid overwritten by another track's.
+    /// Two instruments made the same way must never be called the same thing: a
+    /// saved project names each grid file after its instrument, so a duplicate is a
+    /// grid overwritten by another instrument's.
     #[test]
-    fn a_fresh_track_name_is_never_a_repeat() {
+    fn a_fresh_instrument_name_is_never_a_repeat() {
         let names: std::collections::HashSet<String> =
-            (0..64).map(|_| unique_track_name("LeSynth Fourier 1")).collect();
+            (0..64).map(|_| unique_instrument_name("LeSynth Fourier 1")).collect();
         assert_eq!(names.len(), 64);
-        // The readable part still leads, so a select box shows what the track is
+        // The readable part still leads, so a select box shows what the instrument is
         // before it shows which one it is.
         assert!(
-            unique_track_name("LeSynth Fourier 1").starts_with("LeSynth Fourier 1 · "),
+            unique_instrument_name("LeSynth Fourier 1").starts_with("LeSynth Fourier 1 · "),
             "the name no longer reads as a name"
         );
         // And it survives being turned into a file name.
-        let name = unique_track_name("Voice");
+        let name = unique_instrument_name("Voice");
         assert_eq!(
-            crate::gui::composer::project::sanitize_name(&name).matches('-').count(),
+            crate::gui::sequencer::project::sanitize_name(&name).matches('-').count(),
             4,
             "the UUID did not survive sanitising: {name}"
         );

@@ -11,14 +11,14 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! Real-time playback of a composition: one output stream, one plugin instance
+//! Real-time playback of a sequence: one output stream, one plugin instance
 //! per row, mixed with per-row gain.
 //!
 //! **One stream, many plugins.** An editor drives its own instance from its own
-//! `cpal` stream; a composition needs several instruments summed inside one
+//! `cpal` stream; a sequence needs several instruments summed inside one
 //! callback on one sample clock, hence this second audio path.
 //!
-//! **The Composer loads its own instances** from each track's recipe
+//! **The Sequencer loads its own instances** from each instrument's recipe
 //! ([`PlaybackSource`]) rather than borrowing the editor's: a VST3 processor is
 //! not re-entrant, so one already pulled by an editor's stream cannot also be
 //! pulled by this one. The grid is snapshotted from the live editor when there
@@ -36,13 +36,13 @@
 //! a sorted per-row cursor — no allocation or locking of its own.
 //!
 //! **A repeat picks up edits.** While it loops, the panel hands the transport
-//! the composition again whenever it changes ([`CompositionPlayer::update_live`]);
+//! the sequence again whenever it changes ([`SequencePlayer::update_live`]);
 //! the callback swaps it in at the loop point, so a pass is never rearranged
 //! under itself. Only the schedules and gains change that way — which plugin
 //! each row plays cannot, because loading one is not something an audio callback
 //! can do.
 //!
-//! **Repeat** loops on the composition's *written* length — the longest row,
+//! **Repeat** loops on the sequence's *written* length — the longest row,
 //! trailing silence included — not on the last note plus its release. The wrap is
 //! cut at the exact sample, inside the device block if need be, so a loop does
 //! not drift by up to a buffer every pass.
@@ -68,7 +68,7 @@ use crate::audio::engine::declared_block_size;
 use crate::plugin::{detect_format, BlockProcessor, PluginFormat, PluginInstance};
 use crate::vst::{next_instance_token, Vst3Instance, Vst3Module};
 
-/// Velocity every composed note is played at. The Composer has no velocity
+/// Velocity every composed note is played at. The Sequencer has no velocity
 /// control, and a mid-scale value keeps VSTs that map velocity to level audible
 /// without slamming them.
 const NOTE_VELOCITY: u8 = 100;
@@ -91,7 +91,7 @@ pub struct PlannedNote {
     pub dur_secs: f64,
     pub pitch: u8,
     /// Where in the file the note starts, for a row that plays one — see
-    /// [`crate::gui::composer::Item::start`]. Zero, and ignored, for a note on a
+    /// [`crate::gui::sequencer::Item::start`]. Zero, and ignored, for a note on a
     /// plugin: an instrument has nothing to start into.
     pub start_secs: f64,
 }
@@ -119,7 +119,7 @@ struct Hit {
     start_secs: f64,
 }
 
-/// One composer row, ready to play.
+/// One sequencer row, ready to play.
 pub struct RowPlan {
     /// The panel's row id, which is how a live edit finds the voice again.
     pub row_id: u64,
@@ -137,11 +137,11 @@ pub struct RowEdit {
     pub notes: Vec<PlannedNote>,
 }
 
-/// The stretch of the composition a repeat plays over, in seconds from its
+/// The stretch of the sequence a repeat plays over, in seconds from its
 /// start: `[start_secs, end_secs)`.
 ///
 /// The panel names both ends as *note lengths* from the beginning of the
-/// composition, because that is the vocabulary the rest of it is written in —
+/// sequence, because that is the vocabulary the rest of it is written in —
 /// a bar is a length rather than a timestamp. By the time it reaches here they
 /// are seconds, like every other time in this module.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -151,14 +151,14 @@ pub struct LoopSpan {
 }
 
 impl LoopSpan {
-    /// The whole composition — what a repeat looped over before it could be
+    /// The whole sequence — what a repeat looped over before it could be
     /// given a window, and what a pair of untouched boxes still means.
     pub fn whole(end_secs: f64) -> Self {
         Self { start_secs: 0.0, end_secs }
     }
 }
 
-/// A composition edited mid-flight, waiting for the next loop point.
+/// A sequence edited mid-flight, waiting for the next loop point.
 struct LiveUpdate {
     rows: Vec<VoiceEdit>,
     loop_start: u64,
@@ -185,7 +185,7 @@ struct VoiceEdit {
 
 /// A row's sound plus its schedule, as the callback sees it.
 struct Voice {
-    /// The panel's row ids: which rows of the composition this one voice is
+    /// The panel's row ids: which rows of the sequence this one voice is
     /// playing. Usually one; several when they were found to be shareable (see
     /// [`share_groups`]).
     row_ids: Vec<u64>,
@@ -204,7 +204,7 @@ struct Voice {
     sound: Sound,
 }
 
-/// What a voice makes its sound with. Two kinds, because a wav track has no
+/// What a voice makes its sound with. Two kinds, because a wav instrument has no
 /// plugin at all: there is nothing to instantiate, nothing to send MIDI to, and
 /// the file plays at the pitch it was recorded at.
 enum Sound {
@@ -272,17 +272,17 @@ impl SampleSound {
     }
 }
 
-/// A running composition. Dropping it stops playback: the stream field is
+/// A running sequence. Dropping it stops playback: the stream field is
 /// declared first, so it is torn down before the plugin instances (and the
 /// libraries they live in) it points at.
-pub struct CompositionPlayer {
+pub struct SequencePlayer {
     stream: Option<cpal::Stream>,
     /// Keeps every loaded instance (and its library) alive for the stream's life.
     _plugins: Vec<Arc<PluginInstance>>,
     position: Arc<AtomicU64>,
     finished: Arc<AtomicBool>,
     /// Where a repeat goes back to, in samples — the start of the window the
-    /// panel's two length boxes name. Zero is the top of the composition.
+    /// panel's two length boxes name. Zero is the top of the sequence.
     loop_start: Arc<AtomicU64>,
     /// Where a repeat wraps, in samples. Owned by the callback (it is the one
     /// that adopts a live edit's new length) and read here for the transport
@@ -312,13 +312,13 @@ pub struct CompositionPlayer {
     /// Plugin instances those rows are sharing.
     pub instances: usize,
     pub total_rows: usize,
-    /// End of the composition, tail included.
+    /// End of the sequence, tail included.
     pub total_secs: f64,
 }
 
-/// A composition with its plugins loaded and its schedules resolved, waiting for
-/// a stream. Built by [`CompositionPlayer::prepare`], off the GUI thread.
-pub struct PreparedComposition {
+/// A sequence with its plugins loaded and its schedules resolved, waiting for
+/// a stream. Built by [`SequencePlayer::prepare`], off the GUI thread.
+pub struct PreparedSequence {
     voices: Vec<Voice>,
     plugins: Vec<Arc<PluginInstance>>,
     end_sample: u64,
@@ -331,7 +331,7 @@ pub struct PreparedComposition {
     rows_playing: usize,
 }
 
-impl PreparedComposition {
+impl PreparedSequence {
     /// Rows that loaded, and rows asked for.
     pub fn loaded_rows(&self) -> (usize, usize) {
         (self.rows_playing, self.total_rows)
@@ -343,13 +343,13 @@ impl PreparedComposition {
     }
 }
 
-impl CompositionPlayer {
+impl SequencePlayer {
     /// Load an instance per row and start the output stream.
     ///
     /// A row whose plugin fails to load is logged and skipped rather than
-    /// aborting the transport — the rest of the composition still plays, and the
+    /// aborting the transport — the rest of the sequence still plays, and the
     /// caller reports the shortfall through [`Self::loaded_rows`].
-    /// `span` is the stretch a repeat loops over — by default the composition's
+    /// `span` is the stretch a repeat loops over — by default the sequence's
     /// whole written length, which is not the same as where playback ends when
     /// it does *not* repeat (that is the last note-off plus [`TAIL_SECS`]).
     /// `repeat` is read every block, so the checkbox takes effect on a running
@@ -362,12 +362,12 @@ impl CompositionPlayer {
     /// starting, and the reason it is a step of its own.
     ///
     /// A plugin instance costs real time to create (jdrummer ~80 ms, a big
-    /// synth a second) and the Composer needs one *per row*, so a six-row
-    /// composition is half a second before a sound. Doing that on the GUI thread
+    /// synth a second) and the Sequencer needs one *per row*, so a six-row
+    /// sequence is half a second before a sound. Doing that on the GUI thread
     /// freezes the window, which is what makes a Play button feel broken; the
     /// result is `Send`, so the caller can do this on a thread of its own and
     /// hand it to [`Self::start_prepared`] when it lands.
-    pub fn prepare(plans: Vec<RowPlan>) -> Result<PreparedComposition> {
+    pub fn prepare(plans: Vec<RowPlan>) -> Result<PreparedSequence> {
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -388,7 +388,7 @@ impl CompositionPlayer {
             end_sample,
             rows_playing,
         } = prepare_voices(plans, sample_rate, max_block as i32)?;
-        Ok(PreparedComposition {
+        Ok(PreparedSequence {
             voices,
             plugins,
             end_sample,
@@ -400,15 +400,15 @@ impl CompositionPlayer {
         })
     }
 
-    /// Open the output stream for an already-prepared composition. Cheap — a
+    /// Open the output stream for an already-prepared sequence. Cheap — a
     /// couple of milliseconds — so this half belongs on the GUI thread, where
     /// `cpal::Stream` has to live anyway.
     pub fn start_prepared(
-        prepared: PreparedComposition,
+        prepared: PreparedSequence,
         span: LoopSpan,
         repeat: Arc<AtomicBool>,
     ) -> Result<Self> {
-        let PreparedComposition {
+        let PreparedSequence {
             voices,
             plugins,
             end_sample,
@@ -552,14 +552,14 @@ impl CompositionPlayer {
                     }
                 }
             },
-            |e| log::error!("Composer audio error: {}", e),
+            |e| log::error!("Sequencer audio error: {}", e),
             None,
         )?;
         stream.play()?;
 
         let instances = plugins.len();
         log::info!(
-            "Composer playback started: {rows_playing}/{total_rows} row(s) on \
+            "Sequencer playback started: {rows_playing}/{total_rows} row(s) on \
              {instances} instance(s), {:.1}s",
             end_sample as f64 / sample_rate
         );
@@ -596,13 +596,13 @@ impl CompositionPlayer {
         self.loop_start.load(Ordering::Relaxed) as f64 / self.sample_rate.max(1.0)
     }
 
-    /// Hand the transport a composition edited while it plays. It is taken up
+    /// Hand the transport a sequence edited while it plays. It is taken up
     /// whole at the next loop point; until then the pass in flight is untouched.
     ///
     /// Rows are matched by [`RowEdit::row_id`]: a row the transport is not
     /// playing is ignored (it has no plugin loaded, and an audio callback cannot
     /// load one), and a row it *is* playing that no longer appears simply falls
-    /// silent. Which track a row plays therefore cannot be changed this way.
+    /// silent. Which instrument a row plays therefore cannot be changed this way.
     ///
     /// Rows sharing an instance are merged back along the grouping the transport
     /// started with — that cannot be revisited either, for the same reason. If an
@@ -651,7 +651,7 @@ impl CompositionPlayer {
         }
     }
 
-    /// Where the composition was *heard* to be at wall-clock instant `t`, in
+    /// Where the sequence was *heard* to be at wall-clock instant `t`, in
     /// seconds from its start — what a note played then lines up with.
     ///
     /// Not simply `t` minus the moment Play was pressed: the callback produces
@@ -694,7 +694,7 @@ impl CompositionPlayer {
 }
 
 /// How far past the last event a wrap may still be pulled back to it, in
-/// samples. The composition's written length and its last note-off are worked
+/// samples. The sequence's written length and its last note-off are worked
 /// out from the same units by two different roundings, so they can disagree by
 /// a sample or so; a stop the user *asked* for is never this close.
 const ROUNDING_SLACK: u64 = 4;
@@ -703,7 +703,7 @@ const ROUNDING_SLACK: u64 = 4;
 ///
 /// The end is the written length, except that a wrap landing a hair before the
 /// last event is pulled back onto it: rounding must not cut the note the
-/// composition ends on. A [`LoopSpan`] that stops early on purpose is a whole
+/// sequence ends on. A [`LoopSpan`] that stops early on purpose is a whole
 /// note value short of that, so it keeps the end it asked for.
 ///
 /// The start is then held at least one sample in front of the end, whatever the
@@ -819,11 +819,11 @@ fn rewind(voices: &mut [Voice], position: &AtomicU64, from: u64) {
 /// part-way in has to *skip* what is behind it rather than let the next block
 /// find it due. Left at zero, every note-on and note-off in front of the
 /// window would be handed to the plugin at once, on the loop's first sample:
-/// not the composition played from there, but a click and whatever notes the
+/// not the sequence played from there, but a click and whatever notes the
 /// pairing happened to leave hanging.
 ///
 /// A note straddling the start is simply not begun again — a repeat resumes the
-/// written composition, it does not retrigger what was already sounding — and a
+/// written sequence, it does not retrigger what was already sounding — and a
 /// sample voice needs no help at all: [`render_voice`] walks its hits past the
 /// block it is filling on its own, which also leaves one straddling the start
 /// playing from the middle, where the transport's clock says it is.
@@ -844,10 +844,10 @@ fn first_event_at(schedule: &[(u64, u8, bool)], from: u64) -> usize {
 /// Which rows can be played by one plugin instance, as groups of indices into
 /// `plans`.
 ///
-/// **Why share.** An instance is expensive in exactly the way a composition
-/// multiplies: a LeSynth track carries its grid and a rendered buffer per key,
-/// a sampler its whole kit, and the Composer used to load one per row. Six rows
-/// of one drum track were six copies of that kit in memory — and six times the
+/// **Why share.** An instance is expensive in exactly the way a sequence
+/// multiplies: a LeSynth instrument carries its grid and a rendered buffer per key,
+/// a sampler its whole kit, and the Sequencer used to load one per row. Six rows
+/// of one drum instrument were six copies of that kit in memory — and six times the
 /// loading. A chord recorded from the keyboard is three rows of one instrument,
 /// which is the same instrument playing three notes.
 ///
@@ -867,14 +867,14 @@ fn first_event_at(schedule: &[(u64, u8, bool)], from: u64) -> usize {
 /// playing one always gets a voice to itself.
 ///
 /// First-fit, in row order, so the first row of a group is the one whose recipe
-/// and gain the group is named by — and a composition of unrelated rows comes
+/// and gain the group is named by — and a sequence of unrelated rows comes
 /// out exactly as it went in, one group each.
 fn share_groups(plans: &[RowPlan]) -> Vec<Vec<usize>> {
     let mut groups: Vec<Vec<usize>> = Vec::new();
     'plan: for (i, plan) in plans.iter().enumerate() {
         // A wav row never shares. A sample voice has one playback position, so
         // two rows on one would have to be mixed inside it — and the expense
-        // sharing exists to avoid is not there anyway: what a wav track costs is
+        // sharing exists to avoid is not there anyway: what a wav instrument costs is
         // the decoded file, and that is shared by every voice playing it (see
         // `decode_samples`) whether the rows share a voice or not.
         if plan.source.wav.is_none() {
@@ -898,7 +898,7 @@ fn share_groups(plans: &[RowPlan]) -> Vec<Vec<usize>> {
     groups
 }
 
-/// Whether two rows would load the identical instance. The track's *name* is not
+/// Whether two rows would load the identical instance. The instrument's *name* is not
 /// part of it: two registry entries pointing at the same library with the same
 /// state are the same sound whatever they are called.
 fn same_recipe(a: &PlaybackSource, b: &PlaybackSource) -> bool {
@@ -925,13 +925,13 @@ fn notes_collide(a: &[PlannedNote], b: &[PlannedNote]) -> bool {
 
 /// Load an instance per row, import its grid and resolve its notes to sample
 /// times. Returns the voices, the instances keeping their libraries alive, and
-/// the last sample of the composition (the final note-off plus [`TAIL_SECS`]).
+/// the last sample of the sequence (the final note-off plus [`TAIL_SECS`]).
 ///
-/// A row whose plugin fails to load is logged and skipped: one broken track must
-/// not take the rest of the composition with it. `plugins.len()` is how many
+/// A row whose plugin fails to load is logged and skipped: one broken instrument must
+/// not take the rest of the sequence with it. `plugins.len()` is how many
 /// actually loaded.
 /// One ready instance per plan, `None` where the row could not be loaded — a
-/// broken row is logged and skipped rather than taking the composition with it.
+/// broken row is logged and skipped rather than taking the sequence with it.
 ///
 /// **One at a time, deliberately.** Loading six rows takes six times as long as
 /// one, and doing them on six threads would take about one — but a plugin's
@@ -966,7 +966,7 @@ fn load_instances(
             .or_insert_with(|| match Vst3Module::open(&plan.source.plugin_path) {
                 Ok(m) => Some(Arc::new(m)),
                 Err(e) => {
-                    log::warn!("Composer: '{}' failed to load: {e:#}", plan.source.name);
+                    log::warn!("Sequencer: '{}' failed to load: {e:#}", plan.source.name);
                     None
                 }
             });
@@ -992,8 +992,8 @@ fn load_instances(
 /// it plays the identical samples.
 ///
 /// A file that will not decode is logged and left out, and its rows fall silent
-/// the same way a row whose plugin will not load does — one broken track must
-/// not take the composition with it.
+/// the same way a row whose plugin will not load does — one broken instrument must
+/// not take the sequence with it.
 fn decode_samples(plans: &[RowPlan]) -> HashMap<PathBuf, Arc<DecodedAudio>> {
     let mut decoded: HashMap<PathBuf, Arc<DecodedAudio>> = HashMap::new();
     for plan in plans {
@@ -1006,7 +1006,7 @@ fn decode_samples(plans: &[RowPlan]) -> HashMap<PathBuf, Arc<DecodedAudio>> {
                 decoded.insert(path.clone(), Arc::new(audio));
             }
             Err(e) => log::warn!(
-                "Composer: '{}' could not decode {}: {e:#}",
+                "Sequencer: '{}' could not decode {}: {e:#}",
                 plan.source.name,
                 path.display()
             ),
@@ -1043,7 +1043,7 @@ fn load_one(
     let inst = match loaded {
         Ok(i) => Arc::new(i),
         Err(e) => {
-            log::warn!("Composer: '{}' failed to load: {e:#}", plan.source.name);
+            log::warn!("Sequencer: '{}' failed to load: {e:#}", plan.source.name);
             return None;
         }
     };
@@ -1062,21 +1062,21 @@ fn load_one(
             .is_ok_and(|current| current == *bytes);
         if !unchanged {
             if let Err(e) = inst.restore_state(bytes) {
-                log::warn!("Composer: '{}' state restore failed: {e:#}", plan.source.name);
+                log::warn!("Sequencer: '{}' state restore failed: {e:#}", plan.source.name);
             }
         }
     }
     let _ = inst.initialize_audio(sample_rate, max_block);
     if let Some(state) = &plan.source.state {
         if let Err(e) = inst.import_state(state) {
-            log::warn!("Composer: '{}' grid import failed: {e:#}", plan.source.name);
+            log::warn!("Sequencer: '{}' grid import failed: {e:#}", plan.source.name);
         }
     }
     Some(inst)
 }
 
 /// Everything [`prepare_voices`] settles: the voices themselves, the instances
-/// keeping their libraries alive, where the composition ends, and how many rows
+/// keeping their libraries alive, where the sequence ends, and how many rows
 /// actually got a voice — which is not the number of voices, since one serves
 /// however many rows it can.
 struct PreparedVoices {
@@ -1150,7 +1150,7 @@ fn prepare_voices(
         let processor = match BlockProcessor::new(inst.clone(), max_block.max(0) as usize) {
             Ok(p) => p,
             Err(e) => {
-                log::warn!("Composer: '{}' cannot be processed: {e:#}", host.source.name);
+                log::warn!("Sequencer: '{}' cannot be processed: {e:#}", host.source.name);
                 continue;
             }
         };
@@ -1184,7 +1184,7 @@ const CEILING: f32 = 1.0;
 /// The state a mix carries from one block to the next: a scratch buffer for the
 /// voice being rendered, and the limiters. Each voice has its own, so a row
 /// boosted past full scale is turned down by itself instead of ducking the
-/// whole composition every time it peaks; the master's catches what is left
+/// whole sequence every time it peaks; the master's catches what is left
 /// when several loud rows land together — the bass first, so a sub played at
 /// full scale makes room for the drums instead of ducking them with everything
 /// else (see [`Limiter::low_band`]).
@@ -1374,7 +1374,7 @@ pub fn default_export_format() -> (f64, usize) {
         .unwrap_or((44_100.0, 2))
 }
 
-/// The composition rendered to interleaved samples, off the audio device — what
+/// The sequence rendered to interleaved samples, off the audio device — what
 /// "Export WAV" writes.
 ///
 /// Faster than real time: nothing waits on a clock, and a LeSynth key with no
@@ -1382,7 +1382,7 @@ pub fn default_export_format() -> (f64, usize) {
 /// come out silent for being asked for sooner than the transport would.
 ///
 /// Returns the samples and how many of `plans` actually loaded, so the caller
-/// can report a composition that exported short of what was asked for.
+/// can report a sequence that exported short of what was asked for.
 pub fn render_offline(
     plans: Vec<RowPlan>,
     sample_rate: f64,
@@ -1404,7 +1404,7 @@ pub fn render_offline(
     let mut bus = MixBus::new(voices.len(), channels, sample_rate);
     // The mix's limiters hand back audio a moment older than what they were
     // given, so the render runs on past the end by exactly that and drops the
-    // same amount off the front: the file starts where the composition does,
+    // same amount off the front: the file starts where the sequence does,
     // and ends with the last of it rather than a silence of look-ahead.
     let latency = bus.latency_frames() as u64;
     let render_end = end_sample + latency;
@@ -1428,7 +1428,7 @@ pub fn render_offline(
     Ok((out, rows_playing, total_rows))
 }
 
-impl Drop for CompositionPlayer {
+impl Drop for SequencePlayer {
     fn drop(&mut self) {
         // Explicit, so the ordering that matters is stated rather than inferred
         // from field order: the stream stops before `_plugins` unloads the
@@ -1487,7 +1487,7 @@ mod tests {
     /// The window a repeat runs between, in samples.
     ///
     /// Two things have to hold at once, and they pull opposite ways: a wrap must
-    /// not land a rounding hair before the composition's last note-off and cut
+    /// not land a rounding hair before the sequence's last note-off and cut
     /// it, and a stop the user *asked* for — which is a whole note value early,
     /// never a hair — must be left exactly where they put it. The clamp is
     /// therefore a tolerance rather than an unbounded pull; before this it was
@@ -1496,7 +1496,7 @@ mod tests {
     #[test]
     fn a_loop_window_keeps_a_deliberate_stop_and_still_covers_a_rounding_hair() {
         let rate = 48_000.0;
-        let last_event = 96_000; // two seconds of composition
+        let last_event = 96_000; // two seconds of sequence
 
         // A hair short of the last event: rounding, so it is pulled back onto it.
         let (_, end) = loop_window(LoopSpan::whole(1.99999), rate, last_event);
@@ -1512,13 +1512,13 @@ mod tests {
         let (start, end) = loop_window(LoopSpan { start_secs: 9.0, end_secs: 1.0 }, rate, 0);
         assert!(start < end, "start {start} must stay in front of end {end}");
         let (start, end) = loop_window(LoopSpan { start_secs: 0.0, end_secs: 0.0 }, rate, 0);
-        assert!(start < end, "an empty composition still needs a sample to play");
+        assert!(start < end, "an empty sequence still needs a sample to play");
     }
 
     /// A pass that starts part-way in has to *skip* the events behind it. Left
     /// at zero, the cursor would hand the plugin every note-on and note-off in
     /// front of the window at once, on the loop's first sample: not the
-    /// composition played from there, but a click and whatever notes the
+    /// sequence played from there, but a click and whatever notes the
     /// pairing happened to leave hanging.
     #[test]
     fn seeking_a_voice_skips_the_events_in_front_of_the_window() {
@@ -1633,7 +1633,7 @@ mod tests {
         );
         assert_eq!(last, 2000);
         // And the same notes as the ranges a sample voice plays over, in time
-        // order: what the wav row of a composition is played from.
+        // order: what the wav row of a sequence is played from.
         assert_eq!(
             hits,
             vec![
@@ -1667,10 +1667,10 @@ mod tests {
     }
 
     /// A plugin row and a wav row are never the same recipe, however alike the
-    /// rest of them looks — `plugin_path` on a wav track is the audio file, and
+    /// rest of them looks — `plugin_path` on a wav instrument is the audio file, and
     /// a plugin one is a library that would be loaded.
     #[test]
-    fn a_wav_track_is_not_the_plugin_of_the_same_name() {
+    fn a_wav_instrument_is_not_the_plugin_of_the_same_name() {
         assert!(!same_recipe(&wav_source("/loop.wav"), &source("/loop.wav")));
         assert!(same_recipe(&wav_source("/loop.wav"), &wav_source("/loop.wav")));
     }

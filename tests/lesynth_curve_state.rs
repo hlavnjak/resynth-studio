@@ -13,7 +13,7 @@
 // limitations under the License.
 //! What the `.lsft` grid does **not** carry: the controls that drew it.
 //!
-//! A LeSynth track's curves live in the grid, but every control in the Synth
+//! A LeSynth instrument's curves live in the grid, but every control in the Synth
 //! editor — each harmonic's curve type, offset and granularity, and the 32
 //! nested-Fourier amplitude/phase sliders and base frequency under them — lives
 //! in the plugin's own state instead. A project that saved only the grid

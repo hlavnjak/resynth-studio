@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! What a note means on a drum track.
+//! What a note means on a drum instrument.
 //!
 //! A pitch is only ever a MIDI note number — the host sends the number and the
 //! plugin decides what it hits. For a melodic instrument the number *is* the
@@ -26,7 +26,7 @@
 //!
 //! **Naming, not numbering, is where this goes wrong.** Drum charts almost
 //! always call note 36 "C1" — they name middle C as C3, where this host names it
-//! C4 — so the very same note reads "C2" in the Composer. Go by the numbers.
+//! C4 — so the very same note reads "C2" in the Sequencer. Go by the numbers.
 //!
 //! So the hint here is *General MIDI's* answer, not the loaded plugin's: a
 //! sampler with sixteen chromatic pads will still sound whatever is on the pad,

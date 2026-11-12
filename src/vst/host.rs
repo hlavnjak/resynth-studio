@@ -248,7 +248,7 @@ impl AnalysisGrid {
     }
 
     /// The same grid as a [`TrackState`] — what an instance is loaded from and a
-    /// `.lsft` is written in, so an analysis can become a playable track without
+    /// `.lsft` is written in, so an analysis can become a playable instrument without
     /// an editor opening. `bucket_periods` are whole sample counts, `f32` only
     /// because that is the ABI's array type.
     pub fn to_track_state(&self) -> TrackState {
@@ -337,7 +337,7 @@ impl Vst3Instance {
     /// `ModuleEntry` is not something to race: a caller making several instances
     /// of the same plugin opens the module once and calls this per instance.
     /// Note that this being safe to *call* concurrently says nothing about the
-    /// plugin behind it — see `load_instances` in the Composer's player.
+    /// plugin behind it — see `load_instances` in the Sequencer's player.
     pub fn from_module(
         module: Arc<Vst3Module>,
         class_id: Option<&[i8; 16]>,
@@ -641,7 +641,7 @@ impl Vst3Instance {
                             log::warn!("import_flags failed ({rc}); harmonics stay as loaded");
                         }
                     }
-                    // Worth saying out loud: the track plays with harmonics the
+                    // Worth saying out loud: the instrument plays with harmonics the
                     // user switched off, and nothing on screen would show why.
                     Err(e) => log::warn!(
                         "plugin has no lesynth_fourier_import_flags ({e}); the saved \
@@ -666,7 +666,7 @@ impl Vst3Instance {
             let comp_ref = self.component.as_com_ref();
             let proc_ref = self.processor.as_com_ref();
 
-            // Re-entering this (a second editor for the same track) must not
+            // Re-entering this (a second editor for the same instrument) must not
             // reconfigure a running plugin underneath itself.
             if self.active.swap(true, Ordering::SeqCst) {
                 return Ok(());
@@ -1529,7 +1529,7 @@ mod tests {
     }
 
     /// A plugin's own state is how the host carries the knobs a user set —
-    /// out of an editor's instance and into the one the Composer plays, and into
+    /// out of an editor's instance and into the one the Sequencer plays, and into
     /// a project file. Anything less and a custom VST3 always plays its defaults.
     ///
     /// This is the general path: it goes through `IComponent::getState`, which

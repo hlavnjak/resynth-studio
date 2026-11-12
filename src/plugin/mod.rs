@@ -13,7 +13,7 @@
 // limitations under the License.
 //! One plugin, whatever format it came in.
 //!
-//! The rest of the DAW — the Tracks panel, the Composer, the audio engine —
+//! The rest of the DAW — the Instruments panel, the Sequencer, the audio engine —
 //! never asks which format a plugin is. It holds a [`PluginInstance`], sets it
 //! up with [`PluginInstance::initialize_audio`], drives it through a
 //! [`BlockProcessor`], saves and restores it as an opaque byte string, and asks
@@ -184,7 +184,7 @@ pub fn detect_format(path: &Path, plugin_id: Option<&str>) -> Result<PluginForma
 /// library, and runs them when it exits; unload first and that thread jumps into
 /// unmapped memory. A plugin thread still running at unload does the same. On
 /// Linux and macOS a lingering thread used to pin the library by accident; on
-/// Windows nothing did, and closing LeSynth's editor or stopping the Composer
+/// Windows nothing did, and closing LeSynth's editor or stopping the Sequencer
 /// crashed the process. So the library is pinned on purpose: `RTLD_NODELETE`, or
 /// a pinned module handle. The plugin's own exit hook still runs; only the
 /// unmapping is skipped, and opening the same library again reuses the mapping.
@@ -244,7 +244,7 @@ fn library_format(path: &Path) -> Result<PluginFormat> {
 }
 
 /// Check that `path` really is a loadable plugin, without starting it up — what
-/// the Tracks panel calls the moment a plugin is picked, so a wrong choice is
+/// the Instruments panel calls the moment a plugin is picked, so a wrong choice is
 /// reported while the user is still looking at the picker.
 pub fn validate(path: &Path, plugin_id: Option<&str>) -> Result<PluginFormat> {
     let format = detect_format(path, plugin_id)?;
@@ -264,7 +264,7 @@ pub fn validate(path: &Path, plugin_id: Option<&str>) -> Result<PluginFormat> {
 }
 
 /// What a plugin calls itself and how it categorises itself, without making an
-/// instance — the Tracks panel uses it to spot a drum kit. `None` when the
+/// instance — the Instruments panel uses it to spot a drum kit. `None` when the
 /// format has no such description or the plugin could not be read.
 pub fn describe(path: &Path, plugin_id: Option<&str>) -> Option<(String, String)> {
     match detect_format(path, plugin_id).ok()? {
@@ -325,7 +325,7 @@ impl PluginInstance {
         Ok(Self { backend })
     }
 
-    /// Wrap a VST3 instance already made — the Composer opens each VST3 module
+    /// Wrap a VST3 instance already made — the Sequencer opens each VST3 module
     /// once and makes all of its instances from it.
     pub fn from_vst3(instance: Vst3Instance) -> Self {
         Self { backend: Backend::Vst3(instance) }
@@ -377,7 +377,7 @@ impl PluginInstance {
 
     /// Set the plugin up for `sample_rate` and blocks of up to `max_block_size`
     /// frames, and switch it on. Calling it again on a running instance does
-    /// nothing: a second editor for the same track must not reconfigure the
+    /// nothing: a second editor for the same instrument must not reconfigure the
     /// plugin under the stream already driving it.
     pub fn initialize_audio(&self, sample_rate: f64, max_block_size: i32) -> Result<()> {
         match &self.backend {
@@ -394,7 +394,7 @@ impl PluginInstance {
     /// as an opaque byte string, the `.vststate` beside a project.
     ///
     /// Opaque to the host and **specific to the format**: a VST3's component
-    /// state means nothing to the same plugin loaded as a CLAP. A track records
+    /// state means nothing to the same plugin loaded as a CLAP. An instrument records
     /// which file it loads, and with it which format, so the two always travel
     /// together.
     pub fn save_state(&self) -> Result<Vec<u8>> {

@@ -17,6 +17,6 @@ pub mod input;
 pub use drums::{gm_percussion_name, plays_a_drum_kit};
 pub use input::{
     add_midi_tap, list_midi_ports, list_usb_midi_keyboards, new_midi_queue, new_midi_taps,
-    new_octave_shift, MidiEventQueue, MidiFeed, MidiRouter, MidiTap, MidiTaps, OctaveShift,
+    new_octave_shift, KeyboardTarget, MidiEventQueue, MidiFeed, MidiRouter, MidiTap, MidiTaps, OctaveShift,
     MAX_OCTAVE_SHIFT,
 };

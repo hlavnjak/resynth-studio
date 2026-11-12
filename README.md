@@ -12,10 +12,10 @@ is the VST3/CLAP plugin that does the analysis and synthesis, and ReSynth Studio
 is the host that feeds it recordings.
 
 <p align="center">
-  <img src="assets/track_0.2.0_1.png" alt="ReSynth Studio 0.2.0: Tracks panel and Track Composer rows" width="800">
+  <img src="assets/track_0.2.0_1.png" alt="ReSynth Studio 0.2.0: Instruments panel and Sequencer rows" width="800">
 </p>
 <p align="center">
-  <img src="assets/track_0.2.0_2.png" alt="ReSynth Studio 0.2.0: Track Composer transport and repeat window, MIDI and Resynthesis panels" width="800">
+  <img src="assets/track_0.2.0_2.png" alt="ReSynth Studio 0.2.0: Sequencer transport and repeat window, MIDI and Resynthesis panels" width="800">
 </p>
 
 ## Headline feature — Resynthesis
@@ -34,9 +34,9 @@ arbitrary recording and rebuilds it as additive synthesis you can play and edit:
    running in Analysis mode, where individual harmonics can be toggled and the
    result played back on the keyboard.
 
-A file can also skip all of it. **"Add whole file as Track"** publishes the
-recording *itself* — not an analysis of it — as a **wav track**: a Track a
-Composer row plays for the length of one note. There is no pitch to pick, because
+A file can also skip all of it. **"Add whole file as Instrument"** publishes the
+recording *itself* — not an analysis of it — as a **wav instrument**: an Instrument a
+Sequencer row plays for the length of one note. There is no pitch to pick, because
 a recording has the pitch it was made at; what a note frame carries in the pitch
 box's place is a **start** — a slider saying where in the file the note begins,
 which is how a take gets lined up with the beat. It is what a take no
@@ -44,24 +44,24 @@ additive analysis does justice to is for — a drum loop, a spoken line, a whole
 performance — and a project saves it as the path to the file it was added from,
 so the file stays where it is rather than being copied into the project folder.
 
-## Track Composer
+## Sequencer
 
-Arrange the tracks in rows of frames and play them together. Each row plays
-exactly one Track — a LeSynth Fourier track, a custom plugin track, a subtrack
-published from the Resynthesis panel with "Add as Track", or a whole audio file
-published there as a wav track — and any number of rows may share the same one.
+Arrange the instruments in rows of frames and play them together. Each row plays
+exactly one Instrument — a LeSynth Fourier instrument, a custom plugin instrument, a subtrack
+published from the Resynthesis panel with "Add as Instrument", or a whole audio file
+published there as a wav instrument — and any number of rows may share the same one.
 
-- **Rows** are added by hand ("➕ Add Track Row"); a fresh instance starts empty.
-  The select box at the head of a row picks its Track, and follows the track
-  list: delete the track a row is playing and the row moves to another one, or
-  to a placeholder while no tracks exist.
+- **Rows** are added by hand ("➕ Add Instrument Row"); a fresh instance starts empty.
+  The select box at the head of a row picks its Instrument, and follows the instrument
+  list: delete the instrument a row is playing and the row moves to another one, or
+  to a placeholder while no instruments exist.
 - **Enabled — a lane that is silent, not gone.** Every row carries an
   **Enabled** box, ticked on every new row. Untick it and the row is left out of
   the transport and out of an exported wav, while everything on it stays exactly
-  where it is: the notes, the block, the track it plays, the length it gives the
-  composition. That is how a part is heard without the two rows drowning it, and
+  where it is: the notes, the block, the instrument it plays, the length it gives the
+  sequence. That is how a part is heard without the two rows drowning it, and
   how they come back afterwards — deleting the rows and building them again is
-  the alternative, and it loses the work. **Enable all**, beside "➕ Add Track
+  the alternative, and it loses the work. **Enable all**, beside "➕ Add Instrument
   Row", is the same switch for every row at once: it is unticked while any row
   is off, and a click makes them all agree with it. The setting is saved with
   the project; a project written before it existed loads with every row playing,
@@ -73,7 +73,7 @@ published there as a wav track — and any number of rows may share the same one
 - **A row is a sequence of frames**, laid left to right and simply played one
   after another: nothing is positioned by hand, nothing is dragged, and nothing
   can overlap. Deleting a frame pulls everything behind it forward.
-- **Drum tracks name their notes.** On a row playing a plugin recognised as a
+- **Drum instruments name their notes.** On a row playing a plugin recognised as a
   drum kit, the pitch box reads `C2 · Bass Drum (Kick)` rather than `C2`, and a
   new note starts on the kick instead of middle C. The names are General MIDI's,
   which is the map nearly every kit follows; they are added to the pitch, never
@@ -102,7 +102,7 @@ published there as a wav track — and any number of rows may share the same one
   a note frame removes the note *and* its space, and there is no way to remove
   one without the other. Setting a space to `0 whole` and `—` is the way to run
   two notes together — the frame stays as a placeholder, but adds no time.
-- **Blocks — copying a section across every track at once.** Music repeats, and
+- **Blocks — copying a section across every instrument at once.** Music repeats, and
   the second time round should not cost what the first did. Each note frame
   carries a select box (`☐`): click it to start a **block**, click another frame
   on the row to take everything between them, and click one that is already in
@@ -120,13 +120,13 @@ published there as a wav track — and any number of rows may share the same one
     same amount on every row. A copy occupies the block's **window** (from its
     first note to the end of its last space), not the frames' own extent, so the
     silence a row leaves at either end of the window is put back between one copy
-    and the next and the tracks stay in step however many times it is pressed.
+    and the next and the instruments stay in step however many times it is pressed.
     The selection moves onto the copy, so pressing it again repeats the repeat.
   - **🗐 Copy** and **📋 Paste at End** carry a block, with the silence in front
-    of each row's part of it, to the end of the composition — every row padded up
+    of each row's part of it, to the end of the sequence — every row padded up
     to the end of the longest one, so a block that sounded together is pasted
     sounding together. It goes back on the rows it came from: the frames name a
-    pitch, a length and a place in a file that mean what they mean on the track
+    pitch, a length and a place in a file that mean what they mean on the instrument
     they were written for.
   - A gap between copies is arithmetic, not a length anyone picked, so it is not
     always one the three length boxes can name — `255/256` needs 255 of the
@@ -144,7 +144,7 @@ published there as a wav track — and any number of rows may share the same one
   pass in flight the last one.
 - **The loop can be trimmed at either end.** Two more note lengths, on the line
   under the transport, say where a repeat starts and where it stops — each
-  counted *from the beginning of the composition*, in the same three select
+  counted *from the beginning of the sequence*, in the same three select
   boxes a note is written with. Both from the same end so the pair can be read
   against each other: `1/2` and `7/4` say which is in front of which at a
   glance. A stop left at zero means the end of the arrangement, and one asked
@@ -155,17 +155,17 @@ published there as a wav track — and any number of rows may share the same one
 - **A loop follows your edits.** While Repeat is on, changing notes — pitch,
   length, adding or deleting them — or a row's gain, the tempo or the repeat
   window is picked up at the next time round, without stopping. Adding a row, pointing one at another
-  track, or switching one off is the exception: each changes which plugins are
+  instrument, or switching one off is the exception: each changes which plugins are
   loaded, which cannot happen while the audio callback is running, so the panel
   says to press Play again.
 - **Play / Stop** at the foot of the section renders the whole arrangement in
   real time, lighting up the frame each row is sounding as it goes: one output
   stream, one plugin instance per row, mixed with each row's own gain. The
-  Composer loads its own instances, so a composition plays whether or not the
-  tracks' editors are open — and when one is open, its live grid is what plays.
+  Sequencer loads its own instances, so a sequence plays whether or not the
+  instruments' editors are open — and when one is open, its live grid is what plays.
   **Space** does the same: it plays when nothing is playing and stops whatever
   is (unless a text box is being typed in).
-- **Export WAV** writes the whole composition to a 16-bit `.wav` at the output
+- **Export WAV** writes the whole sequence to a 16-bit `.wav` at the output
   device's rate and channel count. It renders offline, through the same voices,
   schedule and mix the transport uses, so the file is what Play sounds like; the
   render runs in the background and the panel stays usable while it works.
@@ -175,11 +175,11 @@ published there as a wav track — and any number of rows may share the same one
 - **Load Internal plugin** — loads the embedded LeSynth Fourier VST3
   (`internal_plugins/liblesynth_fourier.so`, committed precompiled) by its class
   ID. No separate plugin install required.
-- **A wav track travels with the project.** Saving copies the file into the
+- **A wav instrument travels with the project.** Saving copies the file into the
   project folder's `audio/` and names it there, so a project keeps its
   recordings when `~/ReSynthRecordings` (or wherever the file came from) is
   cleaned out. A row playing one needs no plugin at all: the
-  Composer decodes the file once, however many rows name it, and plays it under
+  Sequencer decodes the file once, however many rows name it, and plays it under
   every note from that note's own start, cut to the note's length and faded a few
   milliseconds at each end so a cut cannot click. A start past the end of the
   file is simply silent. It is mixed through the same
@@ -187,19 +187,19 @@ published there as a wav track — and any number of rows may share the same one
   exactly what the transport plays.
 - **Plugin sounds are kept.** What a plugin is playing — the knobs set in
   its own editor — is taken from the instance when its editor closes, handed to
-  the Composer's instances, and written into the project folder as a
+  the Sequencer's instances, and written into the project folder as a
   `.vststate` beside the manifest. It travels over `IComponent::getState`, the
   mechanism every VST3 has, rather than LeSynth's grid ABI, which only ours does.
-  A **LeSynth** track keeps one too, beside its `.lsft`, and needs both: the
+  A **LeSynth** instrument keeps one too, beside its `.lsft`, and needs both: the
   `.lsft` is the harmonic grid, and the `.vststate` is every control that drew
   it — each harmonic's curve type, offset and granularity, and the 32
   nested-Fourier amplitude/phase sliders and base frequency under them, none of
   which is in the grid. Saving only the grid reloaded a correct picture over
   sliders that all read zero.
-- **External plugins, in every common format** — "Create Custom Plugin Track"
+- **External plugins, in every common format** — "Create Custom Plugin Instrument"
   lists what is installed, filterable by format, and can browse for a bundle or
   a plugin file anywhere else. Every format plays notes, renders in the
-  Composer and an exported `.wav`, keeps its knobs in the track (and in a saved
+  Sequencer and an exported `.wav`, keeps its knobs in the instrument (and in a saved
   project, as the plugin's own state beside the manifest), and shows its own
   editor in a native window (raw X11 on Linux, raw Win32 on Windows, an
   NSWindow on macOS):
@@ -231,7 +231,7 @@ published there as a wav track — and any number of rows may share the same one
     is refused by name. Editors are the plugin's own UI library (X11UI /
     WindowsUI), given instance access only when they ask for it.
   - **Audio Unit** — found by its type/subtype/manufacturer codes, which a
-    track records as its plugin id (`au:aumu:dls :appl`); state is the unit's
+    instrument records as its plugin id (`au:aumu:dls :appl`); state is the unit's
     `ClassInfo` property list.
 
   Anything that is not loadable — a library with a missing dependency, a VST2
@@ -240,7 +240,8 @@ published there as a wav track — and any number of rows may share the same one
   says what the host sees in any plugin (`--list` prints everything the picker
   would offer); `tests/third_party_plugins.rs` loads and renders what is
   installed, in every format.
-- **MIDI input** — pick a USB keyboard / port, connect, refresh.
+- **MIDI input** — pick a USB keyboard / port, connect, refresh; **Plays instrument**
+  gives the keyboard to one instrument instead of every open one.
 - **Logging** to `resynth-studio.log`.
 - **Formerly Gemstone DAW.** Projects saved under the old name (`.gmstn`) still
   open; saving one writes a `.rsyn` beside it. Takes recorded into
@@ -278,8 +279,8 @@ src/
   gui/
     app.rs            # top-level egui app
     registry.rs       # the shared list of Tracks every panel agrees on
-    track.rs          # the Tracks panel
-    composer/         # the Track Composer panel + its playback engine
+    instrument.rs          # the Instruments panel
+    sequencer/         # the Sequencer panel + its playback engine
     resynth.rs        # the Resynthesis panel
     editor_window/    # embedded plugin editor window (x11 / windows / fallback)
 ```

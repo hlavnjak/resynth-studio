@@ -11,8 +11,8 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! "Export Track Composition as WAV", end to end: the offline render must
-//! produce the composition's own length of audio, with the notes actually
+//! "Export Sequence as WAV", end to end: the offline render must
+//! produce the sequence's own length of audio, with the notes actually
 //! sounding in it. Rendering faster than real time is where an export can go
 //! wrong — a note asked for before its buffer is ready would export silence
 //! that plays fine in the transport.
@@ -21,7 +21,7 @@ use std::path::PathBuf;
 
 use resynth_studio::audio::write_wav_i16;
 use resynth_studio::track_format::TrackState;
-use resynth_studio::gui::composer::player::{render_offline, PlannedNote, RowPlan};
+use resynth_studio::gui::sequencer::player::{render_offline, PlannedNote, RowPlan};
 use resynth_studio::gui::registry::PlaybackSource;
 use resynth_studio::vst::class_ids;
 
@@ -31,7 +31,7 @@ const RATE: f64 = 44_100.0;
 const CHANNELS: usize = 2;
 
 /// A grid a key can actually be rendered from: a decaying harmonic series over
-/// four buckets. A track row carries one of these; an instance without one has
+/// four buckets. An instrument row carries one of these; an instance without one has
 /// an empty grid and every key renders silence, so a test that skipped it would
 /// be measuring nothing.
 fn grid() -> TrackState {
@@ -76,7 +76,7 @@ fn lesynth_source() -> PlaybackSource {
 }
 
 #[test]
-fn a_composition_exports_the_audio_it_plays() {
+fn a_sequence_exports_the_audio_it_plays() {
     let notes = vec![
         PlannedNote { at_secs: 0.0, dur_secs: 0.4, pitch: 60, start_secs: 0.0 },
         PlannedNote { at_secs: 0.5, dur_secs: 0.4, pitch: 64, start_secs: 0.0 },

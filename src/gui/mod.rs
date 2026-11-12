@@ -12,10 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 pub mod app;
-pub mod composer;
+pub mod sequencer;
 pub mod editor_window;
 pub mod registry;
 pub mod resynth;
-pub mod track;
+pub mod instrument;
 
 pub use app::DawApp;

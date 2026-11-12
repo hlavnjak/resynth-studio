@@ -85,7 +85,7 @@ mod tests {
         assert_eq!(file_label("/home/kuba/Music/My Song/My Song.rsyn"), "My Song.rsyn");
         assert_eq!(file_label("/opt/vst3/Dexed.vst3"), "Dexed.vst3");
         // A folder is named by its own last component, which is what the
-        // Composer shows for a project directory.
+        // Sequencer shows for a project directory.
         assert_eq!(file_label("/home/kuba/Music/My Song"), "My Song");
         // Relative paths, and a name that is already bare, come through as-is.
         assert_eq!(file_label("internal_plugins/liblesynth_fourier.so"), "liblesynth_fourier.so");

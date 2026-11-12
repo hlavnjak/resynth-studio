@@ -89,12 +89,12 @@ fn resynthesis_reproduces_every_source_file() {
     assert!(checked >= 2, "not enough source files present to prove anything");
 }
 
-/// A saved track must reload with its exact inverse intact — what `.lsft` v3
+/// A saved instrument must reload with its exact inverse intact — what `.lsft` v3
 /// exists for. The grid alone cannot be inverted (bucket lengths are not
 /// derivable from `pitch_ratio`, and DC/Nyquist are not harmonics), so before v3
-/// a track sounded worse after saving it than before.
+/// an instrument sounded worse after saving it than before.
 #[test]
-fn a_saved_track_reloads_with_its_exact_inverse() {
+fn a_saved_instrument_reloads_with_its_exact_inverse() {
     use resynth_studio::track_format::TrackState;
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -139,7 +139,7 @@ fn a_saved_track_reloads_with_its_exact_inverse() {
     state.validate().expect("validate");
     assert!(
         state.supports_exact_inverse(),
-        "an analysed track must save with its exact inverse"
+        "an analysed instrument must save with its exact inverse"
     );
     let reloaded = TrackState::from_bytes(&state.to_bytes()).expect("reparse");
     assert!(reloaded.supports_exact_inverse());
@@ -170,7 +170,7 @@ fn a_saved_track_reloads_with_its_exact_inverse() {
     assert_eq!(rec.len(), original.len());
     assert!(
         db(worst) < -80.0,
-        "a reloaded track no longer reproduces its source: {:.1} dB",
+        "a reloaded instrument no longer reproduces its source: {:.1} dB",
         db(worst)
     );
 }

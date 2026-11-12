@@ -11,19 +11,19 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! The one list of **Tracks** every panel agrees on.
+//! The one list of **Instruments** every panel agrees on.
 //!
-//! A Track is a playable sound source — an instrument track from the Tracks
-//! panel or a subtrack published from Resynthesis. Composer rows map onto one by
-//! id, so the registry, not any single panel, is what "all Tracks" means.
+//! An Instrument is a playable sound source — a plugin instrument from the Instruments
+//! panel or a subtrack published from Resynthesis. Sequencer rows map onto one by
+//! id, so the registry, not any single panel, is what "all Instruments" means.
 //!
 //! Entries are *recipes*, not live plugins: a library path, a class id, and the
 //! state to load into a fresh instance — LeSynth's harmonic grid, or any other
-//! plugin's own `IComponent` state — so a composition plays whether or not the
-//! track's editor is open. When it is, [`TrackEntry::live`] points at that
-//! instance, so the Composer can snapshot what is being edited right now.
+//! plugin's own `IComponent` state — so a sequence plays whether or not the
+//! instrument's editor is open. When it is, [`InstrumentEntry::live`] points at that
+//! instance, so the Sequencer can snapshot what is being edited right now.
 //!
-//! One kind of track is not a plugin at all: a **wav track** ([`TrackEntry::wav`])
+//! One kind of instrument is not a plugin at all: a **wav instrument** ([`InstrumentEntry::wav`])
 //! is an audio file, played back whole as one note. Its recipe is the path, and
 //! nothing else — there is no instance to load, no state to import and no editor
 //! to snapshot.
@@ -38,9 +38,9 @@ use std::sync::Weak;
 use crate::track_format::TrackState;
 use crate::plugin::PluginInstance;
 
-/// One registered Track.
-pub struct TrackEntry {
-    /// Stable id. Composer rows store this, so a row survives tracks being added
+/// One registered Instrument.
+pub struct InstrumentEntry {
+    /// Stable id. Sequencer rows store this, so a row survives instruments being added
     /// and removed around it.
     pub id: u64,
     pub name: String,
@@ -52,19 +52,19 @@ pub struct TrackEntry {
     /// a CLAP plugin id, an LV2 plugin URI, or an Audio Unit's codes. `None`
     /// takes the first. See [`crate::plugin`].
     pub plugin_id: Option<String>,
-    /// LeSynth tracks can carry a grid and be tagged for state import/export.
+    /// LeSynth instruments can carry a grid and be tagged for state import/export.
     pub is_lesynth: bool,
-    /// This track plays a drum kit, so its notes are named after what they hit
+    /// This instrument plays a drum kit, so its notes are named after what they hit
     /// rather than left as pitches. See [`crate::midi::plays_a_drum_kit`].
     pub percussion: bool,
-    /// The audio file this track *is*, played whole as one note — a track with
+    /// The audio file this instrument *is*, played whole as one note — an instrument with
     /// no plugin behind it at all. `Some` makes every plugin field above inert:
     /// nothing is loaded, no state is imported, and the note's pitch is ignored
     /// (a file has the pitch it was recorded at). Published from the
     /// Resynthesis panel, and saved in a project as this path.
     pub wav: Option<PathBuf>,
     /// How long that file runs. Not playback's business — it decodes the file
-    /// and knows — but the Composer's: it is the range of the slider that says
+    /// and knows — but the Sequencer's: it is the range of the slider that says
     /// where in the file a note starts, and a range short of the recording puts
     /// part of it out of reach.
     pub wav_secs: f32,
@@ -75,13 +75,13 @@ pub struct TrackEntry {
     /// is where a third-party VST3 keeps the knob positions the user set in its
     /// editor. `None` = whatever the plugin starts up with.
     pub vst_state: Option<Vec<u8>>,
-    /// The instance behind this track's open editor, if any. Weak so a closed
+    /// The instance behind this instrument's open editor, if any. Weak so a closed
     /// editor is simply gone; the entry itself outlives it.
     pub live: Option<Weak<PluginInstance>>,
 }
 
-/// Everything the Composer needs to load and configure its own instance of a
-/// track — a value, so it can be built while the registry is borrowed and used
+/// Everything the Sequencer needs to load and configure its own instance of a
+/// instrument — a value, so it can be built while the registry is borrowed and used
 /// after the borrow ends.
 #[derive(Clone)]
 pub struct PlaybackSource {
@@ -92,21 +92,21 @@ pub struct PlaybackSource {
     pub is_lesynth: bool,
     pub state: Option<TrackState>,
     pub vst_state: Option<Vec<u8>>,
-    /// See [`TrackEntry::wav`]. `Some` means the row plays this file rather than
+    /// See [`InstrumentEntry::wav`]. `Some` means the row plays this file rather than
     /// any of the fields above.
     pub wav: Option<PathBuf>,
 }
 
 struct Inner {
-    entries: Vec<TrackEntry>,
+    entries: Vec<InstrumentEntry>,
     next_id: u64,
 }
 
-/// Shared handle to the track list. Cloning shares, it does not copy.
+/// Shared handle to the instrument list. Cloning shares, it does not copy.
 #[derive(Clone)]
-pub struct TrackRegistry(Rc<RefCell<Inner>>);
+pub struct InstrumentRegistry(Rc<RefCell<Inner>>);
 
-impl Default for TrackRegistry {
+impl Default for InstrumentRegistry {
     fn default() -> Self {
         Self(Rc::new(RefCell::new(Inner {
             entries: Vec::new(),
@@ -115,8 +115,8 @@ impl Default for TrackRegistry {
     }
 }
 
-impl TrackRegistry {
-    /// Register a track and return its id.
+impl InstrumentRegistry {
+    /// Register an instrument and return its id.
     pub fn add(
         &self,
         name: impl Into<String>,
@@ -128,7 +128,7 @@ impl TrackRegistry {
         let mut inner = self.0.borrow_mut();
         let id = inner.next_id;
         inner.next_id += 1;
-        inner.entries.push(TrackEntry {
+        inner.entries.push(InstrumentEntry {
             id,
             name: name.into(),
             plugin_path,
@@ -145,19 +145,19 @@ impl TrackRegistry {
         id
     }
 
-    /// Register an audio file as a track that plays it whole, as one note, and
-    /// return its id. The path is the whole recipe — see [`TrackEntry::wav`];
-    /// `secs` is how long the file runs, which only the Composer's start slider
+    /// Register an audio file as an instrument that plays it whole, as one note, and
+    /// return its id. The path is the whole recipe — see [`InstrumentEntry::wav`];
+    /// `secs` is how long the file runs, which only the Sequencer's start slider
     /// needs.
     pub fn add_wav(&self, name: impl Into<String>, path: PathBuf, secs: f32) -> u64 {
         let mut inner = self.0.borrow_mut();
         let id = inner.next_id;
         inner.next_id += 1;
-        inner.entries.push(TrackEntry {
+        inner.entries.push(InstrumentEntry {
             id,
             name: name.into(),
-            // A wav track has no library; the file it plays is what it is, and
-            // naming it here is what lets a message about the track say so.
+            // A wav instrument has no library; the file it plays is what it is, and
+            // naming it here is what lets a message about the instrument say so.
             plugin_path: path.clone(),
             class_id: None,
             plugin_id: None,
@@ -172,8 +172,8 @@ impl TrackRegistry {
         id
     }
 
-    /// The wav track playing `path`, if one is already registered. A file is one
-    /// track however many times it is asked for: opening it again in Resynthesis,
+    /// The wav instrument playing `path`, if one is already registered. A file is one
+    /// instrument however many times it is asked for: opening it again in Resynthesis,
     /// or loading a project that names it, finds the entry rather than adding a
     /// second one whose rows would be indistinguishable from the first's.
     pub fn find_wav(&self, path: &Path) -> Option<u64> {
@@ -185,9 +185,9 @@ impl TrackRegistry {
             .map(|e| e.id)
     }
 
-    /// How long the file this track plays runs, or `None` for a track that is
-    /// not a wav track (or is gone). This is also the question "is this a wav
-    /// track?": what the Composer does with the answer — no pitch box, and a
+    /// How long the file this instrument plays runs, or `None` for an instrument that is
+    /// not a wav instrument (or is gone). This is also the question "is this a wav
+    /// instrument?": what the Sequencer does with the answer — no pitch box, and a
     /// start slider over the file — needs the length in the same breath.
     pub fn wav_secs(&self, id: u64) -> Option<f32> {
         let inner = self.0.borrow();
@@ -195,21 +195,21 @@ impl TrackRegistry {
         entry.wav.as_ref().map(|_| entry.wav_secs)
     }
 
-    /// Whether this track plays an audio file rather than a plugin. `false` for
-    /// a track that is gone.
+    /// Whether this instrument plays an audio file rather than a plugin. `false` for
+    /// an instrument that is gone.
     pub fn is_wav(&self, id: u64) -> bool {
         self.wav_secs(id).is_some()
     }
 
-    /// Record that this track plays a drum kit, which is what puts drum names in
-    /// the Composer's note pickers.
+    /// Record that this instrument plays a drum kit, which is what puts drum names in
+    /// the Sequencer's note pickers.
     pub fn set_percussion(&self, id: u64, percussion: bool) {
         if let Some(e) = self.0.borrow_mut().entries.iter_mut().find(|e| e.id == id) {
             e.percussion = percussion;
         }
     }
 
-    /// Whether this track plays a drum kit. `false` for a track that is gone.
+    /// Whether this instrument plays a drum kit. `false` for an instrument that is gone.
     pub fn is_percussion(&self, id: u64) -> bool {
         self.0
             .borrow()
@@ -219,14 +219,14 @@ impl TrackRegistry {
             .is_some_and(|e| e.percussion)
     }
 
-    /// Name the plugin inside the track's file — see [`TrackEntry::plugin_id`].
+    /// Name the plugin inside the instrument's file — see [`InstrumentEntry::plugin_id`].
     pub fn set_plugin_id(&self, id: u64, plugin_id: Option<String>) {
         if let Some(e) = self.0.borrow_mut().entries.iter_mut().find(|e| e.id == id) {
             e.plugin_id = plugin_id;
         }
     }
 
-    /// Remember a plugin's own state for this track — what a freshly loaded
+    /// Remember a plugin's own state for this instrument — what a freshly loaded
     /// instance is given, and what a project save writes out. Set when a custom
     /// plugin's editor closes, and when a project is loaded.
     pub fn set_vst_state(&self, id: u64, state: Option<Vec<u8>>) {
@@ -235,8 +235,8 @@ impl TrackRegistry {
         }
     }
 
-    /// Remember a LeSynth grid for this track, the same way — set when its
-    /// editor closes, so the Composer keeps playing what was edited.
+    /// Remember a LeSynth grid for this instrument, the same way — set when its
+    /// editor closes, so the Sequencer keeps playing what was edited.
     pub fn set_state(&self, id: u64, state: Option<TrackState>) {
         if let Some(e) = self.0.borrow_mut().entries.iter_mut().find(|e| e.id == id) {
             if state.is_some() {
@@ -249,7 +249,7 @@ impl TrackRegistry {
         self.0.borrow_mut().entries.retain(|e| e.id != id);
     }
 
-    /// Point this track at the live instance behind its open editor, or clear it
+    /// Point this instrument at the live instance behind its open editor, or clear it
     /// (`None`) when the editor closes.
     pub fn set_live(&self, id: u64, live: Option<Weak<PluginInstance>>) {
         if let Some(e) = self.0.borrow_mut().entries.iter_mut().find(|e| e.id == id) {
@@ -278,7 +278,7 @@ impl TrackRegistry {
             .map(|e| e.name.clone())
     }
 
-    /// `(id, name)` for every track, for the row select box.
+    /// `(id, name)` for every instrument, for the row select box.
     pub fn list(&self) -> Vec<(u64, String)> {
         self.0
             .borrow()
@@ -288,19 +288,19 @@ impl TrackRegistry {
             .collect()
     }
 
-    pub fn entries(&self) -> Ref<'_, [TrackEntry]> {
+    pub fn entries(&self) -> Ref<'_, [InstrumentEntry]> {
         Ref::map(self.0.borrow(), |i| i.entries.as_slice())
     }
 
-    /// What to load to play track `id`. The grid comes from the live editor when
+    /// What to load to play instrument `id`. The grid comes from the live editor when
     /// one is open — the user is composing with what they can hear there, not
-    /// with the state the track was registered in — and from the registered
+    /// with the state the instrument was registered in — and from the registered
     /// state otherwise.
     pub fn playback_source(&self, id: u64) -> Option<PlaybackSource> {
         let inner = self.0.borrow();
         let entry = inner.entries.iter().find(|e| e.id == id)?;
-        // A wav track is its file. There is no instance to ask what it is
-        // playing, and nothing about it changes while a composition is open.
+        // A wav instrument is its file. There is no instance to ask what it is
+        // playing, and nothing about it changes while a sequence is open.
         if let Some(path) = &entry.wav {
             return Some(PlaybackSource {
                 name: entry.name.clone(),
@@ -315,7 +315,7 @@ impl TrackRegistry {
         }
         let live = entry.live.as_ref().and_then(Weak::upgrade);
 
-        // Whichever kind of state this track carries, prefer the open editor's:
+        // Whichever kind of state this instrument carries, prefer the open editor's:
         // the user is composing with what they can hear there.
         let (mut live_grid, mut live_vst) = (None, None);
         if let Some(plugin) = live {

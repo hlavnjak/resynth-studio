@@ -46,7 +46,7 @@ pub type MidiTaps = Arc<Mutex<Vec<Weak<Mutex<Vec<TimedMessage>>>>>>;
 /// A small controller — a Keystation Mini 32 is 32 keys, C3 upwards — simply has
 /// no low notes on it, so a bass line has to be played somewhere else and moved.
 /// Doing it here rather than in each consumer means one implementation for the
-/// track editors, the Composer's recording and anything added later: what is
+/// instrument editors, the Sequencer's recording and anything added later: what is
 /// heard and what is recorded cannot disagree about which note was played.
 pub type OctaveShift = Arc<AtomicI32>;
 
@@ -66,7 +66,7 @@ pub fn new_octave_shift() -> OctaveShift {
 const MAX_TAPPED_EVENTS: usize = 65_536;
 
 /// Cap on buffered MIDI messages. The queue is drained by an audio engine only
-/// while a track/subtrack editor is open; without this bound, playing a
+/// while an instrument/subtrack editor is open; without this bound, playing a
 /// connected keyboard with no editor open would grow it without limit (and flood
 /// on the next open). Dropping the oldest keeps at most a brief burst.
 const MAX_QUEUED_EVENTS: usize = 1024;
@@ -270,6 +270,8 @@ mod tests {
     fn router_inner(default_port: Option<&str>) -> RouterInner {
         RouterInner {
             default_port: default_port.map(str::to_string),
+            default_target: KeyboardTarget::Everyone,
+            default_held: [false; 128],
             open: HashMap::new(),
             subs: Vec::new(),
             next_id: 0,
@@ -290,6 +292,44 @@ mod tests {
 
     fn drained(queue: &MidiEventQueue) -> Vec<[u8; 3]> {
         queue.lock().unwrap().drain(..).collect()
+    }
+
+    /// The MIDI panel's instrument picker: of the instances following the
+    /// panel's port only the chosen one plays, an instance on a port of its
+    /// own is left alone, and a key held across the switch is released where
+    /// it was pressed.
+    #[test]
+    fn the_panels_keyboard_can_be_given_to_one_instance() {
+        let mut inner = router_inner(Some("A"));
+        let first = subscribe(&mut inner, None);
+        let second = subscribe(&mut inner, None);
+        let own_port = subscribe(&mut inner, Some("B"));
+
+        inner.set_default_target(KeyboardTarget::Feed(1));
+        inner.deliver("A", [0x90, 60, 100]);
+        inner.deliver("B", [0x90, 40, 100]);
+        assert!(drained(&first).is_empty());
+        assert_eq!(drained(&second), vec![[0x90, 60, 100]]);
+        assert_eq!(drained(&own_port), vec![[0x90, 40, 100]]);
+
+        // Key 60 is still down on the second instance when the first takes over.
+        inner.set_default_target(KeyboardTarget::Feed(0));
+        assert_eq!(drained(&second), vec![[0x80, 60, 0]]);
+        inner.deliver("A", [0x80, 60, 0]);
+        inner.deliver("A", [0x90, 62, 100]);
+        assert_eq!(drained(&first), vec![[0x80, 60, 0], [0x90, 62, 100]]);
+        assert!(drained(&second).is_empty());
+
+        // An instrument picked before its editor ever opened: silence, not everything.
+        inner.set_default_target(KeyboardTarget::Nobody);
+        inner.deliver("A", [0x90, 64, 100]);
+        assert!(drained(&first).iter().all(|m| m[0] == 0x80));
+        assert!(drained(&second).is_empty());
+
+        inner.set_default_target(KeyboardTarget::Everyone);
+        inner.deliver("A", [0x90, 65, 100]);
+        assert_eq!(drained(&first), vec![[0x90, 65, 100]]);
+        assert_eq!(drained(&second), vec![[0x90, 65, 100]]);
     }
 
     /// The defect the router exists to fix: two instances open at once each hear
@@ -345,7 +385,7 @@ mod tests {
         inner.deliver("B", [0x90, 60, 100]);
         assert!(inner.subs.is_empty(), "a dead subscription was kept");
         assert!(!port_is_wanted("B", Some("A"), &inner.subs));
-        // The panel's own port stays open whether or not a track asked for it.
+        // The panel's own port stays open whether or not an instrument asked for it.
         assert!(port_is_wanted("A", Some("A"), &inner.subs));
     }
 
@@ -427,16 +467,16 @@ mod tests {
 ///   again when the last one goes.
 ///
 /// `None` for a wanted port means "whatever the MIDI panel is connected to",
-/// which is what a track uses until it is told otherwise. That is resolved at
+/// which is what an instrument uses until it is told otherwise. That is resolved at
 /// delivery, not at subscription, so changing the panel's port moves every
-/// track that follows it without re-subscribing anything.
+/// instrument that follows it without re-subscribing anything.
 #[derive(Clone)]
 pub struct MidiRouter {
     inner: Arc<Mutex<RouterInner>>,
     /// Applied once, here, so every subscriber sees the same note — see
     /// [`shift_octaves`].
     octave_shift: OctaveShift,
-    /// The Composer's recorders, which listen to every port at once: a take is
+    /// The Sequencer's recorders, which listen to every port at once: a take is
     /// "what was played", not "what one instance heard".
     taps: MidiTaps,
 }
@@ -444,6 +484,11 @@ pub struct MidiRouter {
 struct RouterInner {
     /// The port a subscriber gets when it has not asked for one of its own.
     default_port: Option<String>,
+    /// Which of the subscribers following that port actually hear it.
+    default_target: KeyboardTarget,
+    /// Keys down on the default port right now, so that moving the target
+    /// mid-note can release them where they were pressed.
+    default_held: [bool; 128],
     /// Open connections, by port name. Dropping one closes the device.
     open: HashMap<String, MidiInputConnection<()>>,
     subs: Vec<Sub>,
@@ -456,9 +501,38 @@ struct Sub {
     /// The port it asked for, or `None` to follow the panel's.
     want: Option<String>,
     /// Weak, so an instance that goes away unsubscribes by being dropped. The
-    /// queue is kept alive by the track that owns it and the audio engine
+    /// queue is kept alive by the instrument that owns it and the audio engine
     /// draining it.
     queue: Weak<Mutex<VecDeque<[u8; 3]>>>,
+}
+
+/// Who hears the MIDI panel's port, among the instances that follow it.
+///
+/// With several editors open, every one of them following the panel's port
+/// plays every key — which is right for layering two sounds and wrong for
+/// playing one of them. This is the MIDI panel's instrument picker. An
+/// instance pointed at a port of its own is not following the panel and is
+/// not affected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum KeyboardTarget {
+    /// Every instance following the panel's port.
+    #[default]
+    Everyone,
+    /// Only the instance with this feed id.
+    Feed(u64),
+    /// One instrument was picked, but it has no feed yet (its editor has never
+    /// been opened): nothing plays rather than everything.
+    Nobody,
+}
+
+impl KeyboardTarget {
+    fn includes(self, feed_id: u64) -> bool {
+        match self {
+            Self::Everyone => true,
+            Self::Feed(id) => id == feed_id,
+            Self::Nobody => false,
+        }
+    }
 }
 
 /// A subscription handed to one instance: the queue its audio engine drains, and
@@ -473,6 +547,8 @@ impl MidiRouter {
         Self {
             inner: Arc::new(Mutex::new(RouterInner {
                 default_port: None,
+                default_target: KeyboardTarget::Everyone,
+                default_held: [false; 128],
                 open: HashMap::new(),
                 subs: Vec::new(),
                 next_id: 0,
@@ -488,7 +564,7 @@ impl MidiRouter {
     }
 
     /// Connect the panel's own port — the default feed. Opening it is what
-    /// "Connect" does; every track following the default moves with it.
+    /// "Connect" does; every instrument following the default moves with it.
     pub fn set_default_port(&self, port: Option<String>) -> Result<()> {
         if let Some(name) = &port {
             self.open_port(name)?;
@@ -498,6 +574,15 @@ impl MidiRouter {
             inner.close_unused();
         }
         Ok(())
+    }
+
+    /// Choose which of the instances following the panel's port hear it — see
+    /// [`KeyboardTarget`]. Cheap when nothing changes, so it can be called
+    /// every frame.
+    pub fn set_default_target(&self, target: KeyboardTarget) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.set_default_target(target);
+        }
     }
 
     /// Start feeding a new instance. `want` is the port it should listen to, or
@@ -540,7 +625,7 @@ impl MidiRouter {
     }
 
     /// Drop the connections nothing is listening to any more — an editor closed,
-    /// a track removed. Cheap, and the only thing that hands a device back.
+    /// an instrument removed. Cheap, and the only thing that hands a device back.
     pub fn release_unused(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.subs.retain(|s| s.queue.strong_count() > 0);
@@ -618,13 +703,22 @@ impl RouterInner {
     /// subscriptions whose owner has gone.
     fn deliver(&mut self, port: &str, msg: [u8; 3]) {
         let follows_default = self.default_port.as_deref() == Some(port);
+        if follows_default {
+            let key = (msg[1] & 0x7F) as usize;
+            match msg[0] & 0xF0 {
+                0x90 => self.default_held[key] = msg[2] > 0,
+                0x80 => self.default_held[key] = false,
+                _ => {}
+            }
+        }
+        let target = self.default_target;
         self.subs.retain(|sub| {
             let Some(queue) = sub.queue.upgrade() else {
                 return false;
             };
             let wanted = match &sub.want {
                 Some(name) => name == port,
-                None => follows_default,
+                None => follows_default && target.includes(sub.id),
             };
             if wanted {
                 if let Ok(mut q) = queue.lock() {
@@ -636,6 +730,30 @@ impl RouterInner {
             }
             true
         });
+    }
+
+    /// Move the panel's port to another target. An instance that stops hearing
+    /// it is sent a note-off for every key still down: the release that is
+    /// coming will go to the new target, and without this the old one would
+    /// hold the note for good.
+    fn set_default_target(&mut self, target: KeyboardTarget) {
+        let old = self.default_target;
+        if old == target {
+            return;
+        }
+        self.default_target = target;
+        let held = self.default_held;
+        for sub in &self.subs {
+            if sub.want.is_some() || !old.includes(sub.id) || target.includes(sub.id) {
+                continue;
+            }
+            let Some(queue) = sub.queue.upgrade() else { continue };
+            if let Ok(mut q) = queue.lock() {
+                for key in (0..128u8).filter(|&k| held[k as usize]) {
+                    q.push_back([0x80, key, 0]);
+                }
+            };
+        }
     }
 
     /// Close the ports nothing listens to. A device held open by a closed editor

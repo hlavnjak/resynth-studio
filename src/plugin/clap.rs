@@ -18,7 +18,7 @@
 //! plugin's own path and deinitialised when the last instance is gone — not
 //! once per instance — so libraries are shared through [`ClapLibrary`]. Its
 //! factory may hold several plugins, told apart by a reverse-DNS id string,
-//! which is what a track's `plugin_id` records.
+//! which is what an instrument's `plugin_id` records.
 //!
 //! A CLAP plugin asks the host for extensions rather than the other way round,
 //! and a plugin written against a full DAW asks for a lot: thread checks, a
@@ -438,7 +438,7 @@ unsafe extern "C" fn host_get_extension(_host: *const clap_host, id: *const c_ch
 }
 
 unsafe extern "C" fn host_request_restart(_host: *const clap_host) {
-    // Restarting means deactivating and reactivating; a track that needs it
+    // Restarting means deactivating and reactivating; an instrument that needs it
     // gets it the next time its editor or the transport starts.
     log::debug!("CLAP plugin asked for a restart");
 }

@@ -11,13 +11,13 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! Turning a MIDI keyboard take into Composer rows.
+//! Turning a MIDI keyboard take into Sequencer rows.
 //!
 //! **What is recorded is a time, what a row holds is a length.** The keyboard
 //! gives note-on/note-off instants; a row is a chain of frames where a note's
 //! position is nothing but the sum of the lengths before it. Converting between
 //! the two is this module, and it happens once, when the take ends — nothing is
-//! written into the composition while the user is still playing.
+//! written into the sequence while the user is still playing.
 //!
 //! **Auto-rounding.** Nobody plays on the sample. Every start and every length
 //! is snapped to the nearest multiple of a chosen note value ([`ROUND_CHOICES`],
@@ -43,7 +43,7 @@
 //! **Chords become rows, a late release does not.** A row is one sequence — it
 //! cannot hold two notes at once — so notes that genuinely sound together are
 //! split across as many rows as the deepest chord in the take
-//! ([`split_voices`]), all playing the same track. Notes that merely run into
+//! ([`split_voices`]), all playing the same instrument. Notes that merely run into
 //! each other are *not*: letting go of one key a moment after pressing the next
 //! is how anyone plays a line, and a row each would turn a bass line into a pile
 //! of one-note rows. The earlier note is shortened to where the later one starts
@@ -117,7 +117,7 @@ impl GridNote {
 
 /// The notes in a captured stream of MIDI messages.
 ///
-/// `clock` places a message on the composition's timeline; a message it cannot
+/// `clock` places a message on the sequence's timeline; a message it cannot
 /// place (it arrived before the transport made a sound) is dropped, and one it
 /// places before zero is pulled up to it — a key hit a hair early is a note
 /// played at the top of the take, not a note at a negative time.
@@ -327,7 +327,7 @@ pub fn split_units(mut units: i64) -> Vec<Duration> {
     out
 }
 
-/// One row's worth of a take as the Composer holds it: the lead space, then the
+/// One row's worth of a take as the Sequencer holds it: the lead space, then the
 /// frames.
 ///
 /// Every note is followed by the silence up to the next one, exactly. Where that
@@ -374,7 +374,7 @@ pub fn voice_items(notes: &[GridNote], next_item_id: &mut u64) -> (Duration, Vec
             id: take_id(next_item_id),
             pitch: note.pitch,
             // A take is played on a keyboard, and a key has no file to start
-            // into. A row moved onto a wav track afterwards starts at the top of
+            // into. A row moved onto a wav instrument afterwards starts at the top of
             // it, which is where a note that was never given a start belongs.
             start: 0.0,
             dur,
@@ -412,7 +412,7 @@ mod tests {
     use super::*;
     use std::time::Duration as StdDuration;
 
-    use crate::gui::composer::Row;
+    use crate::gui::sequencer::Row;
 
     const WHOLE: i64 = UNITS_PER_WHOLE;
     const HALF: i64 = WHOLE / 2;

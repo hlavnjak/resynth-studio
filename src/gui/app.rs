@@ -18,11 +18,11 @@ use eframe::egui;
 
 use crate::midi::{self, MidiRouter, OctaveShift, MAX_OCTAVE_SHIFT};
 
-use super::composer::project::{self, Project, TrackSource};
-use super::composer::{ComposerPanel, ProjectRequest};
-use super::registry::TrackRegistry;
+use super::sequencer::project::{self, Project, InstrumentSource};
+use super::sequencer::{SequencerPanel, ProjectRequest};
+use super::registry::InstrumentRegistry;
 use super::resynth::ResynthPanel;
-use super::track::TracksPanel;
+use super::instrument::InstrumentsPanel;
 
 pub struct DawApp {
     midi_status: String,
@@ -40,20 +40,20 @@ pub struct DawApp {
     /// thread, so the picker moves a connection that is already open.
     octave_shift: OctaveShift,
 
-    // Instrument tracks (LeSynth Fourier / custom VST), each with its own editor.
-    tracks: TracksPanel,
-    // Arrange the registered tracks on a timeline and play them.
-    composer: ComposerPanel,
+    // Plugin instruments (LeSynth Fourier / custom VST), each with its own editor.
+    instruments: InstrumentsPanel,
+    // Arrange the registered instruments on a timeline and play them.
+    sequencer: SequencerPanel,
     // Resynthesis (.wav/.mp3/.m4a → LeSynth Fourier analysis)
     resynth: ResynthPanel,
-    // The shared track list, kept here too so saving a project can read every
-    // track — including subtracks published straight from Resynthesis, which
-    // never pass through the Tracks panel.
-    registry: TrackRegistry,
-    /// Wav tracks a loaded project asked for. They play a file, so they have no
-    /// plugin, no editor and no place in the Tracks panel — but something has to
+    // The shared instrument list, kept here too so saving a project can read every
+    // instrument — including subtracks published straight from Resynthesis, which
+    // never pass through the Instruments panel.
+    registry: InstrumentRegistry,
+    /// Wav instruments a loaded project asked for. They play a file, so they have no
+    /// plugin, no editor and no place in the Instruments panel — but something has to
     /// take them back out of the registry when the next project replaces them,
-    /// the way [`TracksPanel::clear`] does for its own. A wav track published in
+    /// the way [`InstrumentsPanel::clear`] does for its own. A wav instrument published in
     /// this session from Resynthesis is *not* in here: that panel owns it, and
     /// loading a project leaves it alone.
     adopted_wavs: Vec<u64>,
@@ -64,17 +64,17 @@ impl Default for DawApp {
         let midi_taps = midi::new_midi_taps();
         let octave_shift = midi::new_octave_shift();
         let midi_router = MidiRouter::new(octave_shift.clone(), midi_taps.clone());
-        // The one track list the panels share: Tracks and Resynthesis publish
-        // into it, the Composer builds its rows from it.
-        let registry = TrackRegistry::default();
+        // The one instrument list the panels share: Instruments and Resynthesis publish
+        // into it, the Sequencer builds its rows from it.
+        let registry = InstrumentRegistry::default();
         Self {
             midi_status: "Disconnected".to_string(),
             midi_ports: Vec::new(),
             selected_midi_port: None,
             usb_keyboards: Vec::new(),
             selected_usb_keyboard: None,
-            tracks: TracksPanel::new(midi_router.clone(), registry.clone()),
-            composer: ComposerPanel::new(registry.clone(), midi_taps.clone()),
+            instruments: InstrumentsPanel::new(midi_router.clone(), registry.clone()),
+            sequencer: SequencerPanel::new(registry.clone(), midi_taps.clone()),
             midi_router,
             octave_shift,
             resynth: ResynthPanel::new(registry.clone()),
@@ -213,7 +213,7 @@ impl DawApp {
                     // first pass it is shown for a given id, then reuses that
                     // size forever — so a picker first opened with two entries
                     // clips away everything a later rescan finds. See the
-                    // Composer's track select box for the long version.
+                    // Sequencer's instrument select box for the long version.
                     egui::ComboBox::from_id_salt(("usb_keyboard", self.usb_keyboards.len()))
                         .width(260.0)
                         .selected_text(usb_label)
@@ -251,11 +251,50 @@ impl DawApp {
                         });
                     ui.end_row();
 
+                    // Which instrument the panel's keyboard plays. Every open
+                    // editor following the panel's port hears it otherwise,
+                    // so three open instruments are three sounds per key.
+                    ui.label("Plays instrument:");
+                    let choices = self.instruments.keyboard_choices();
+                    let current = self.instruments.keyboard_target();
+                    let mut target = current;
+                    let target_label = match current {
+                        None => "All open instruments".to_string(),
+                        Some(id) => choices
+                            .iter()
+                            .find(|(i, _)| *i == id)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| "All open instruments".to_string()),
+                    };
+                    egui::ComboBox::from_id_salt(("midi_instrument", choices.len()))
+                        .width(260.0)
+                        .selected_text(target_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut target, None, "All open instruments");
+                            for (id, name) in &choices {
+                                ui.selectable_value(&mut target, Some(*id), name);
+                            }
+                        })
+                        .response
+                        .on_hover_text(
+                            "The instrument this keyboard plays.\n\n“All open \
+                             instruments” plays every instrument whose editor is \
+                             open. Picking one plays only that instrument, and opens \
+                             its editor if it is closed — an instrument sounds \
+                             through its open editor.\n\nAn instrument given a MIDI \
+                             port of its own under Instruments keeps listening to \
+                             that port and is not affected.",
+                        );
+                    if target != current {
+                        self.instruments.set_keyboard_target(target);
+                    }
+                    ui.end_row();
+
                     // Where the keyboard's keys land. A small controller — a
                     // Keystation Mini 32 starts at C3 — has no low notes on it
                     // at all, so a bass part has to be played up here and moved
                     // down. Applied to the incoming MIDI itself, so what the
-                    // editors play and what the Composer records are the same
+                    // editors play and what the Sequencer records are the same
                     // note.
                     ui.label("Octave shift:");
                     let mut shift = self.octave_shift.load(Ordering::Relaxed);
@@ -306,7 +345,7 @@ impl DawApp {
         let status = match request {
             ProjectRequest::Save { dir, name } => match self.save_project(&dir, &name) {
                 Ok(n) => {
-                    self.composer.set_project_dir(dir.clone(), name);
+                    self.sequencer.set_project_dir(dir.clone(), name);
                     format!("Saved to {} ({n} grid file(s)).", crate::file_label(&dir))
                 }
                 Err(e) => format!("Save failed: {e:#}"),
@@ -316,44 +355,44 @@ impl DawApp {
                 Err(e) => format!("Load failed: {e:#}"),
             },
         };
-        self.composer.set_status(status);
+        self.sequencer.set_status(status);
     }
 
     /// Write the project folder: the manifest, one `.lsft` for every LeSynth
-    /// Fourier track a row plays, and one `.vststate` for every plugin track —
-    /// the plugin's own state, which is where its knobs live. A LeSynth track
+    /// Fourier instrument a row plays, and one `.vststate` for every plugin instrument —
+    /// the plugin's own state, which is where its knobs live. A LeSynth instrument
     /// gets both: the `.lsft` is its harmonic grid, the `.vststate` is every
     /// control that drew it. Returns how many sound files were written.
     ///
-    /// A file is re-written when any row playing that track has autosave on;
+    /// A file is re-written when any row playing that instrument has autosave on;
     /// otherwise an existing one is left as it is, which is what pins a sound. A
-    /// track with nothing to save (a plain synth-mode LeSynth, or a plugin that
+    /// instrument with nothing to save (a plain synth-mode LeSynth, or a plugin that
     /// gives back no state) writes no file — the manifest records what it is
     /// instead.
     fn save_project(&mut self, dir: &std::path::Path, name: &str) -> anyhow::Result<usize> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("create the folder {}", crate::file_label(dir)))?;
 
-        let autosave: Vec<u64> = self.composer.autosave_track_ids();
-        let mut sources: std::collections::HashMap<u64, TrackSource> = Default::default();
+        let autosave: Vec<u64> = self.sequencer.autosave_instrument_ids();
+        let mut sources: std::collections::HashMap<u64, InstrumentSource> = Default::default();
         let mut taken: Vec<String> = Vec::new();
         let mut taken_audio: Vec<std::path::PathBuf> = Vec::new();
         let mut written = 0usize;
 
-        // One file per distinct track, however many rows share it. Read through
-        // the registry rather than the Tracks panel: a subtrack published from
-        // Resynthesis is a real playable track that never appears there, and
+        // One file per distinct instrument, however many rows share it. Read through
+        // the registry rather than the Instruments panel: a subtrack published from
+        // Resynthesis is a real playable instrument that never appears there, and
         // asking the panel would silently drop its sound from the project.
-        for (id, track_name) in self.registry.list() {
+        for (id, instrument_name) in self.registry.list() {
             // `playback_source` snapshots the live editor when one is open, so
             // what gets written is what the user can currently hear.
             let Some(src) = self.registry.playback_source(id) else { continue };
-            // A wav track's file is copied into the folder, so the project
+            // A wav instrument's file is copied into the folder, so the project
             // keeps its recordings when the folder they were made in is gone.
-            // The track itself keeps playing the file it was opened from.
+            // The instrument itself keeps playing the file it was opened from.
             if let Some(path) = src.wav {
                 let path = project::bundle_audio(dir, &path, &mut taken_audio)?;
-                sources.insert(id, TrackSource::Wav { path });
+                sources.insert(id, InstrumentSource::Wav { path });
                 continue;
             }
             // The plugin's own state, whatever kind of plugin it is. For a
@@ -364,7 +403,7 @@ impl DawApp {
             // reloads the curves with every control that drew them at zero.
             let mut state_file = None;
             if let Some(bytes) = &src.vst_state {
-                let file = project::unique_file_name(&track_name, "vststate", &taken);
+                let file = project::unique_file_name(&instrument_name, "vststate", &taken);
                 let full = dir.join(&file);
                 // Same rule as a grid: autosave off with a file already there
                 // means "keep what is pinned".
@@ -379,7 +418,7 @@ impl DawApp {
             if !src.is_lesynth {
                 sources.insert(
                     id,
-                    TrackSource::Vst {
+                    InstrumentSource::Vst {
                         path: src.plugin_path,
                         class_id: src.class_id,
                         plugin_id: src.plugin_id,
@@ -389,12 +428,12 @@ impl DawApp {
                 continue;
             }
             let Some(state) = src.state else {
-                // A LeSynth track in plain synth mode: nothing to save, and the
+                // A LeSynth instrument in plain synth mode: nothing to save, and the
                 // manifest says so rather than pointing at a file that is not there.
-                sources.insert(id, TrackSource::LeSynthDefault);
+                sources.insert(id, InstrumentSource::LeSynthDefault);
                 continue;
             };
-            let file = project::grid_file_name(&track_name, &taken);
+            let file = project::grid_file_name(&instrument_name, &taken);
             let full = dir.join(&file);
             // Autosave off with a file already there means "keep what is pinned".
             if autosave.contains(&id) || !full.exists() {
@@ -404,20 +443,20 @@ impl DawApp {
                 written += 1;
             }
             taken.push(file.clone());
-            sources.insert(id, TrackSource::LeSynth { file, state: state_file });
+            sources.insert(id, InstrumentSource::LeSynth { file, state: state_file });
         }
 
-        let project = self.composer.to_project(name, |track_id| {
-            track_id
+        let project = self.sequencer.to_project(name, |instrument_id| {
+            instrument_id
                 .and_then(|id| sources.get(&id).cloned())
-                .unwrap_or(TrackSource::None)
+                .unwrap_or(InstrumentSource::None)
         });
         project.write(&dir.join(format!("{name}.{}", project::EXTENSION)))?;
         Ok(written)
     }
 
-    /// Read a project folder back: adopt every track it names into the Tracks
-    /// panel, then hand the composition to the Composer with one resolved
+    /// Read a project folder back: adopt every instrument it names into the Instruments
+    /// panel, then hand the sequence to the Sequencer with one resolved
     /// registry id per row (`None` where the source could not be found).
     fn load_project(&mut self, file: &std::path::Path) -> anyhow::Result<()> {
         let mut project = Project::read(file)?;
@@ -444,84 +483,84 @@ impl DawApp {
                     .flat_map(search_paths),
             )
             .collect();
-        for (track, saved, found) in project.relocate_missing(&wav_dirs, &plugin_dirs) {
-            log::info!("'{track}': {} not found, using {}", saved.display(), found.display());
+        for (instrument, saved, found) in project.relocate_missing(&wav_dirs, &plugin_dirs) {
+            log::info!("'{instrument}': {} not found, using {}", saved.display(), found.display());
         }
 
-        // The loaded project replaces what is open, so the tracks it brings are
-        // the only ones left — otherwise the previous project's tracks would sit
+        // The loaded project replaces what is open, so the instruments it brings are
+        // the only ones left — otherwise the previous project's instruments would sit
         // in the list looking like part of this one. The wav tracks the *last*
         // load brought go with them; the ones Resynthesis is holding open stay,
         // because that panel is still showing the file they play.
-        self.tracks.clear();
+        self.instruments.clear();
         for id in self.adopted_wavs.drain(..) {
             self.registry.remove(id);
         }
 
-        // Distinct sources first, so rows sharing a track share one instance.
-        let mut adopted: Vec<(TrackSource, Option<u64>)> = Vec::new();
+        // Distinct sources first, so rows sharing an instrument share one instance.
+        let mut adopted: Vec<(InstrumentSource, Option<u64>)> = Vec::new();
         let mut resolved = Vec::with_capacity(project.rows.len());
         for row in &project.rows {
             if let Some((_, id)) = adopted.iter().find(|(src, _)| *src == row.source) {
                 resolved.push(*id);
                 continue;
             }
-            let id = self.adopt_source(&row.source, &dir, &row.track_name);
+            let id = self.adopt_source(&row.source, &dir, &row.instrument_name);
             adopted.push((row.source.clone(), id));
             resolved.push(id);
         }
-        self.composer.apply_project(&project, dir, &resolved);
+        self.sequencer.apply_project(&project, dir, &resolved);
         Ok(())
     }
 }
 
 /// Read a plugin's saved `.vststate` from the project folder. A state file that
-/// has gone missing is not fatal: the track loads, and the plugin comes up on
+/// has gone missing is not fatal: the instrument loads, and the plugin comes up on
 /// its own defaults.
 fn read_state_file(
     dir: &std::path::Path,
     file: Option<&str>,
-    track_name: &str,
+    instrument_name: &str,
 ) -> Option<Vec<u8>> {
     let full = dir.join(file?);
     match std::fs::read(&full) {
         Ok(b) => Some(b),
         Err(e) => {
-            log::warn!("'{track_name}': cannot read {} ({e})", full.display());
+            log::warn!("'{instrument_name}': cannot read {} ({e})", full.display());
             None
         }
     }
 }
 
 impl DawApp {
-    /// Bind one project source to a track, or `None` when it cannot be found —
+    /// Bind one project source to an instrument, or `None` when it cannot be found —
     /// a deleted `.lsft`, or a VST that has moved. The row then shows what is
     /// missing and the user picks a replacement.
     fn adopt_source(
         &mut self,
-        source: &TrackSource,
+        source: &InstrumentSource,
         dir: &std::path::Path,
         name: &str,
     ) -> Option<u64> {
-        let name = if name.is_empty() { "Track" } else { name };
+        let name = if name.is_empty() { "Instrument" } else { name };
         match source {
-            TrackSource::None => None,
-            TrackSource::LeSynthDefault => self.tracks.adopt_lesynth(name, None, None).ok(),
-            TrackSource::LeSynth { file, state } => {
+            InstrumentSource::None => None,
+            InstrumentSource::LeSynthDefault => self.instruments.adopt_lesynth(name, None, None).ok(),
+            InstrumentSource::LeSynth { file, state } => {
                 let grid = crate::track_format::TrackState::read(&dir.join(file)).ok()?;
                 // The controls that drew the grid. A project saved before these
                 // were kept — or one whose file has gone missing — still loads:
                 // the curves come back, the controls under them read as new.
                 let bytes = read_state_file(dir, state.as_deref(), name);
-                self.tracks.adopt_lesynth(name, Some(grid), bytes).ok()
+                self.instruments.adopt_lesynth(name, Some(grid), bytes).ok()
             }
-            TrackSource::Wav { path } => {
+            InstrumentSource::Wav { path } => {
                 if !path.exists() {
                     log::warn!("'{name}': audio file {} is missing", path.display());
                     return None;
                 }
-                // One track per file: a file already open in Resynthesis, or
-                // named by two rows, is the track that is already registered
+                // One instrument per file: a file already open in Resynthesis, or
+                // named by two rows, is the instrument that is already registered
                 // rather than a second one indistinguishable from it.
                 if let Some(id) = self.registry.find_wav(path) {
                     return Some(id);
@@ -537,9 +576,9 @@ impl DawApp {
                 self.adopted_wavs.push(id);
                 Some(id)
             }
-            TrackSource::Vst { path, class_id, plugin_id, state } => {
+            InstrumentSource::Vst { path, class_id, plugin_id, state } => {
                 let bytes = read_state_file(dir, state.as_deref(), name);
-                self.tracks
+                self.instruments
                     .adopt_vst(name, path.clone(), *class_id, plugin_id.clone(), bytes)
                     .ok()
             }
@@ -555,7 +594,7 @@ impl eframe::App for DawApp {
         super::editor_window::restore_main_gl_context();
         // Reactive repaint: nothing in this window changes without user input, so
         // let eframe/winit idle and wake on real events (egui still self-requests
-        // repaints for its own hover/tooltip/scroll animations). The Tracks and
+        // repaints for its own hover/tooltip/scroll animations). The Instruments and
         // Resynthesis panels each request a low-frequency repaint while they hold
         // an open editor, so windows the user closes directly are reaped promptly.
 
@@ -566,12 +605,12 @@ impl eframe::App for DawApp {
         if !ctx.wants_keyboard_input()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
         {
-            self.composer.toggle_transport(ctx);
+            self.sequencer.toggle_transport(ctx);
         }
         // Ctrl+S (Cmd+S on macOS) is the Save Project button — even from a text
         // box, since saving is never what a typed character means.
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::S)) {
-            self.composer.save_project();
+            self.sequencer.save_project();
         }
 
         // App title bar.
@@ -609,19 +648,20 @@ impl eframe::App for DawApp {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     ui.add_space(6.0);
-                    Self::section(ui, "Tracks", |ui| {
-                        self.tracks.ui(ui);
+                    self.instruments.sync_keyboard_target();
+                    Self::section(ui, "Instruments", |ui| {
+                        self.instruments.ui(ui);
                     });
                     ui.add_space(14.0);
-                    Self::section(ui, "Track Composer", |ui| {
-                        self.composer.ui(ui);
+                    Self::section(ui, "Sequencer", |ui| {
+                        self.sequencer.ui(ui);
                     });
                     // Saving reads the grids out of the live plugin instances and
-                    // loading puts tracks into the Tracks panel, so the request is
-                    // performed here rather than inside the Composer, which owns
+                    // loading puts instruments into the Instruments panel, so the request is
+                    // performed here rather than inside the Sequencer, which owns
                     // neither. Deferred past the draw so the panel is not mutated
                     // mid-frame.
-                    if let Some(request) = self.composer.take_request() {
+                    if let Some(request) = self.sequencer.take_request() {
                         self.perform_project_request(request);
                     }
                     ui.add_space(14.0);
@@ -657,9 +697,9 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("D5.wav")
     }
 
-    /// A wav track survives a project the way every other track does. Loading
+    /// A wav instrument survives a project the way every other instrument does. Loading
     /// a project that names the file by absolute path must bind the row to a
-    /// track that plays it; saving must copy the file into the folder and name
+    /// instrument that plays it; saving must copy the file into the folder and name
     /// it relative, so the project still plays once the original is gone.
     #[test]
     fn a_wav_row_is_copied_into_the_folder_and_loads_back_onto_the_copy() {
@@ -681,23 +721,23 @@ mod tests {
         let mut app = DawApp::default();
         app.load_project(&manifest).expect("loads");
 
-        // One track, playing the file, and the row is on it — not left showing a
+        // One instrument, playing the file, and the row is on it — not left showing a
         // missing source.
-        let tracks = app.registry.list();
-        assert_eq!(tracks.len(), 1, "{tracks:?}");
-        let id = app.registry.find_wav(&d5()).expect("the file is a track");
+        let instruments = app.registry.list();
+        assert_eq!(instruments.len(), 1, "{instruments:?}");
+        let id = app.registry.find_wav(&d5()).expect("the file is an instrument");
         assert!(app.registry.is_wav(id));
         // How long the file runs came back with it: that is the range of the
         // start slider on every note of the row, and a zero would put the whole
         // recording out of reach.
-        let secs = app.registry.wav_secs(id).expect("a wav track knows its length");
+        let secs = app.registry.wav_secs(id).expect("a wav instrument knows its length");
         assert!(
             (secs - 5.81).abs() < 0.05,
             "D5.wav is 5.8 s; the project loaded it as {secs}"
         );
 
         // Saving copies the recording in and names the copy — through the app,
-        // which is what decides what a track's source is.
+        // which is what decides what an instrument's source is.
         app.save_project(&dir, "Take").expect("saves");
         let copy = dir.join(project::AUDIO_DIR).join("D5.wav");
         assert_eq!(std::fs::read(&copy).expect("copied"), std::fs::read(d5()).unwrap());
@@ -708,7 +748,7 @@ mod tests {
         );
 
         // Loading again plays the copy, and must not leave the first load's
-        // track behind.
+        // instrument behind.
         app.load_project(&manifest).expect("loads again");
         assert_eq!(app.registry.list().len(), 1, "{:?}", app.registry.list());
         assert!(app.registry.find_wav(&copy).is_some(), "the row does not play the copy");
@@ -741,11 +781,11 @@ mod tests {
 
         let mut app = DawApp::default();
         app.load_project(&manifest).expect("loads");
-        assert!(app.registry.list().is_empty(), "nothing to play, so no track");
-        let saved = app.composer.to_project("Gone", |_| TrackSource::None);
+        assert!(app.registry.list().is_empty(), "nothing to play, so no instrument");
+        let saved = app.sequencer.to_project("Gone", |_| InstrumentSource::None);
         assert_eq!(
             saved.rows[0].source,
-            TrackSource::Wav { path: PathBuf::from("/nonexistent/gone.wav") },
+            InstrumentSource::Wav { path: PathBuf::from("/nonexistent/gone.wav") },
             "a save after a failed load must not lose the file it was looking for"
         );
 

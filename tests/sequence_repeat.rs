@@ -11,7 +11,7 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//! **Repeat**: the transport loops the composition instead of stopping at the
+//! **Repeat**: the transport loops the sequence instead of stopping at the
 //! end, it picks up edits made while it is looping, unticking it lets the pass
 //! in flight finish — and the loop can be *windowed*, trimmed at either end by
 //! the two note lengths the panel names it with.
@@ -25,18 +25,18 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use resynth_studio::gui::composer::player::{
-    CompositionPlayer, LoopSpan, PlannedNote, RowEdit, RowPlan,
+use resynth_studio::gui::sequencer::player::{
+    SequencePlayer, LoopSpan, PlannedNote, RowEdit, RowPlan,
 };
 use resynth_studio::gui::registry::PlaybackSource;
 use resynth_studio::track_format::TrackState;
 use resynth_studio::vst::class_ids;
 
-/// The composition loops on this, not on the last note plus its release.
+/// The sequence loops on this, not on the last note plus its release.
 const LOOP_SECS: f64 = 1.0;
 
 /// A grid a key can actually be rendered from: a decaying harmonic series over
-/// four buckets. A track row carries one of these; an instance without one has
+/// four buckets. An instrument row carries one of these; an instance without one has
 /// an empty grid and every key renders silence, so a test that skipped it would
 /// be measuring nothing.
 fn grid() -> TrackState {
@@ -95,7 +95,7 @@ fn a_repeat_can_be_windowed_at_both_ends() {
         source: lesynth_source(),
         gain: 1.0,
         notes: vec![
-            // One note per quarter of the composition, so a pass that wrapped
+            // One note per quarter of the sequence, so a pass that wrapped
             // in the wrong place would be audible as well as measurable.
             PlannedNote { at_secs: 0.0, dur_secs: 0.2, pitch: 60, start_secs: 0.0 },
             PlannedNote { at_secs: 0.5, dur_secs: 0.2, pitch: 64, start_secs: 0.0 },
@@ -106,7 +106,7 @@ fn a_repeat_can_be_windowed_at_both_ends() {
     let window = LoopSpan { start_secs: 0.5, end_secs: 1.5 };
 
     let repeat = Arc::new(AtomicBool::new(true));
-    let player = match CompositionPlayer::start(plans, window, repeat.clone()) {
+    let player = match SequencePlayer::start(plans, window, repeat.clone()) {
         Ok(p) => p,
         Err(e) => {
             println!("no audio device to play through ({e:#}) — nothing to test");
@@ -132,7 +132,7 @@ fn a_repeat_can_be_windowed_at_both_ends() {
         );
         if position < previous {
             // It wrapped. From here on it must never fall back to the top of
-            // the composition: what is in front of the start is an intro, and
+            // the sequence: what is in front of the start is an intro, and
             // it is played once.
             wrapped = true;
         }
@@ -147,7 +147,7 @@ fn a_repeat_can_be_windowed_at_both_ends() {
 }
 
 #[test]
-fn repeat_loops_the_composition_until_it_is_switched_off() {
+fn repeat_loops_the_sequence_until_it_is_switched_off() {
     let plans = vec![RowPlan {
         row_id: 0,
         source: lesynth_source(),
@@ -159,7 +159,7 @@ fn repeat_loops_the_composition_until_it_is_switched_off() {
     }];
 
     let repeat = Arc::new(AtomicBool::new(true));
-    let player = match CompositionPlayer::start(plans, LoopSpan::whole(LOOP_SECS), repeat.clone()) {
+    let player = match SequencePlayer::start(plans, LoopSpan::whole(LOOP_SECS), repeat.clone()) {
         Ok(p) => p,
         Err(e) => {
             println!("no audio device to play through ({e:#}) — nothing to test");
@@ -199,7 +199,7 @@ fn repeat_loops_the_composition_until_it_is_switched_off() {
     assert!(wrapped, "never wrapped in 6s of a {LOOP_SECS}s loop");
 
     // An edit made mid-loop is taken up at the next loop point — here a longer
-    // composition, which moves the loop length the transport reports.
+    // sequence, which moves the loop length the transport reports.
     let edited = LOOP_SECS * 2.0;
     player.update_live(
         &[RowEdit {

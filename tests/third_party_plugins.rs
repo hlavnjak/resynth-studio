@@ -32,7 +32,7 @@
 //! With nothing installed there is nothing to test and the test says so and
 //! passes; run it with `--nocapture` to see what it found.
 
-use resynth_studio::gui::composer::player::{render_offline, PlannedNote, RowPlan};
+use resynth_studio::gui::sequencer::player::{render_offline, PlannedNote, RowPlan};
 use resynth_studio::gui::registry::PlaybackSource;
 use resynth_studio::plugin::{scan_installed, validate, PluginFormat, PluginInstance};
 
@@ -66,7 +66,7 @@ fn installed_plugins_load_and_render_in_every_format() {
             let name = &plugin.name;
             let id = plugin.plugin_id.as_deref();
 
-            // 1) A real instance, initialised the way a track's editor does.
+            // 1) A real instance, initialised the way an instrument's editor does.
             let instance = PluginInstance::load(&plugin.path, None, id, None)
                 .unwrap_or_else(|e| panic!("'{name}' ({}) failed to load: {e:#}", format.label()));
             assert_eq!(instance.format(), format, "'{name}' loaded as the wrong format");
@@ -76,8 +76,8 @@ fn installed_plugins_load_and_render_in_every_format() {
             let io = instance.io();
             assert!(!io.outputs.is_empty(), "'{name}' negotiated no audio output at all");
 
-            // 2) Its state, out and back in — what carries a track's knobs into
-            //    the Composer and into a project.
+            // 2) Its state, out and back in — what carries an instrument's knobs into
+            //    the Sequencer and into a project.
             let state = instance.save_state();
             if let Ok(bytes) = &state {
                 instance
@@ -86,7 +86,7 @@ fn installed_plugins_load_and_render_in_every_format() {
             }
             drop(instance);
 
-            // 3) Two notes through the Composer's offline render — the path that
+            // 3) Two notes through the Sequencer's offline render — the path that
             //    hands `process()` its buffers, for exactly this bus layout, and
             //    with the saved state restored into a fresh instance.
             let plan = RowPlan {

@@ -13,7 +13,7 @@
 // limitations under the License.
 //! A look-ahead peak limiter: the ceiling a signal meets on its way out.
 //!
-//! Something has to stop a boosted track from leaving full scale, and the cheap
+//! Something has to stop a boosted instrument from leaving full scale, and the cheap
 //! answer — clamping every sample at ±1.0 — is the worst one. A clamp is a
 //! nonlinearity applied to single samples, so it does not turn a loud passage
 //! down, it flattens the top off every waveform in it and fills the spectrum
@@ -420,7 +420,7 @@ mod tests {
         assert!(burst.len() > 100, "the burst did not survive: {}", burst.len());
     }
 
-    /// The gain comes back after a peak instead of holding the whole track
+    /// The gain comes back after a peak instead of holding the whole instrument
     /// down — but slowly, over the release rather than at once.
     #[test]
     fn the_gain_returns_after_the_peak() {
