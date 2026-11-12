@@ -81,10 +81,10 @@ published there as a wav instrument — and any number of rows may share the sam
   map and the rule that spots a drum plugin are in `src/midi/drums.rs`.
 - **Notes and spaces.** "➕ Add Note" appends two frames: a **note** frame
   (blue), and behind it a **space** frame (amber) which is the silence that
-  follows. A note frame carries four select boxes — pitch (`C0`–`B8`), the
-  whole-note part of its length, the nominator (`× 1` … `× 16`), and the
-  fraction it counts (1/2 … 1/256). A space frame carries the same three length
-  boxes; it has no pitch — and neither does a note on a **wav row**, which plays
+  follows. A note frame carries a pitch select box (`C0`–`B8`) and three
+  boxes its length is typed into: the whole notes (0–1024), then the fractional
+  part written as a fraction, `+ nominator / denominator` (0–255 over 1–256). A
+  space frame carries the same three length boxes; it has no pitch — and neither does a note on a **wav row**, which plays
   its file for as long as its length says. That frame is wider than the rest, and
   carries a **start** slider where a pitch would be: a take does not begin on its
   first sample, so the start is what puts the sound on the beat instead of the
@@ -94,13 +94,12 @@ published there as a wav instrument — and any number of rows may share the sam
   start, as closely as the boxes can name it *at the current tempo* — its hover
   text says how close, since a recording's length and a whole number of note
   values agree only by luck. Change the BPM and press it again. A length is the
-  parts added together, so `1` + `× 1` +
-  `1/8` is a whole note tied to an eighth, and `× 3` over `1/8` is `3/8` — the
-  dotted quarter the halving fraction box cannot name on its own. The nominator
-  needs a fraction to count, so it is greyed out while the fraction reads `—`.
+  parts added together, so `1 whole + 1 / 8` is a whole note tied to an eighth,
+  `+ 3 / 8` is a dotted quarter and `+ 1 / 3` a triplet half. Any denominator can
+  be typed; a nominator of `0` is a length with no fractional part.
 - **A space belongs to its note.** It has no delete button of its own: the ✖ on
   a note frame removes the note *and* its space, and there is no way to remove
-  one without the other. Setting a space to `0 whole` and `—` is the way to run
+  one without the other. Setting a space to `0 whole + 0` is the way to run
   two notes together — the frame stays as a placeholder, but adds no time.
 - **Blocks — copying a section across every instrument at once.** Music repeats, and
   the second time round should not cost what the first did. Each note frame

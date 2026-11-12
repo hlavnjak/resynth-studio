@@ -29,9 +29,10 @@
 //! offset against another. It belongs to the row, not to a note, so deleting the
 //! first note leaves it in place to lead the next; it starts at zero.
 //!
-//! **Length is three select boxes**: whole notes, then how many of a fraction
-//! down to 1/256 — the nominator, so `3` of a `1/8` is the dotted quarter that
-//! neither box could say on its own. Notes and spaces carry the same three.
+//! **Length is three typed boxes**: whole notes, then a fraction written as a
+//! fraction — nominator over denominator, any denominator down to 1/256, so
+//! `3 / 8` is a dotted quarter and `1 / 3` a triplet. Notes and spaces carry the
+//! same three.
 //! Time is counted in [`UNITS_PER_WHOLE`]ths, so every length is a whole number
 //! of units and the arithmetic stays exact. Playback lives in [`player`].
 //!
@@ -77,10 +78,16 @@ use self::player::{
 use crate::midi::{add_midi_tap, gm_percussion_name, MidiTap, MidiTaps};
 use super::registry::InstrumentRegistry;
 
-/// Time resolution: a whole note is this many units. 256 makes every fraction in
-/// [`Fraction`] — down to a 1/256 — a whole number of them, so lengths and the
-/// positions they add up to are exact integer arithmetic.
-const UNITS_PER_WHOLE: i64 = 256;
+/// Time resolution: a whole note is this many units.
+///
+/// 2⁸ · 3² · 5² · 7 · 11 · 13, so that every fraction whose denominator is built
+/// from those — every power of two down to a 1/256, and the triplets,
+/// quintuplets and septuplets a typed denominator is mostly wanted for — is a
+/// whole number of units, and lengths and the positions they add up to are exact
+/// integer arithmetic. A denominator with another prime in it (a 1/17) is
+/// rounded to the nearest unit, which at any tempo is a small fraction of one
+/// audio sample.
+const UNITS_PER_WHOLE: i64 = 256 * 9 * 25 * 7 * 11 * 13;
 /// A beat is a quarter note.
 const UNITS_PER_BEAT: i64 = UNITS_PER_WHOLE / 4;
 
@@ -101,12 +108,12 @@ const WAV_CARD_W: f32 = 184.0;
 /// Room kept for the number beside the start slider — the part of it that is
 /// dragged a millisecond at a time, or typed into.
 const START_VALUE_W: f32 = 70.0;
-/// Height of one frame — a header line plus up to four select boxes. A box costs
-/// 24 of it under the app's text sizes, and a card that no longer fits grows
+/// Height of one frame — a header line plus up to three lines of boxes. A line
+/// costs 24 of it under the app's text sizes, and a card that no longer fits grows
 /// past this, over the lane it is drawn in; grow the two together — and see
 /// `every_frame_draws_its_nominator_inside_its_card`, which measures the card
 /// against this rather than trusting the arithmetic.
-const CARD_H: f32 = 124.0;
+const CARD_H: f32 = 102.0;
 /// What a frame is filled with: an amber space, a note, and a note while it is
 /// sounding.
 const SPACE_FILL: egui::Color32 = egui::Color32::from_rgb(78, 62, 38);
@@ -168,31 +175,43 @@ const DEFAULT_PITCH: u8 = 60;
 /// anyone wants first is the kick.
 const DEFAULT_DRUM_PITCH: u8 = 36;
 /// Largest whole-note count a length may carry.
-const MAX_WHOLES: u16 = 16;
+const MAX_WHOLES: u16 = 1024;
 /// …except in the repeat window, whose two lengths are counted from the very
 /// beginning of the sequence and so have to reach anywhere in a long piece.
 const MAX_REPEAT_WHOLES: u16 = 2048;
-/// Largest nominator — how many of its fraction a length may carry. Sixteen,
-/// like [`MAX_WHOLES`]: beyond that the whole-note box says the same thing in
-/// fewer parts.
-const MAX_NUM: u8 = 16;
+/// Largest nominator — how many of its fraction a length may carry.
+const MAX_NUM: u8 = 255;
+/// Largest denominator — the finest fraction a length may be counted in.
+const MAX_DENOM: u16 = 256;
+/// Denominators that share no factor and multiply to [`UNITS_PER_WHOLE`] —
+/// what [`Duration::split`] takes an unnameable length apart by.
+const SPLIT_DENOMS: [i64; 4] = [256, 225, 77, 13];
+/// Most copies one press of Clone makes.
+const MAX_CLONE: u8 = 16;
 
-/// The fractional part of a length, as the fraction of a whole note it is named
-/// for. `None` is a length that is a whole number of whole notes.
+/// The fractional part of a length: the fraction of a whole note it is named
+/// for, held as its denominator — `8` is a 1/8. Any denominator from 1 to
+/// [`MAX_DENOM`] is a fraction; `None` (held as zero) is a length that is a
+/// whole number of whole notes.
+///
+/// The named ones are the powers of two, which is what a recorded take and a
+/// length fitted to a file are written in; a typed denominator can be anything.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Fraction {
-    None,
-    Half,
-    Quarter,
-    Eighth,
-    Sixteenth,
-    ThirtySecond,
-    SixtyFourth,
-    HundredTwentyEighth,
-    TwoHundredFiftySixth,
-}
+pub struct Fraction(u16);
 
+#[allow(non_upper_case_globals)]
 impl Fraction {
+    pub const None: Fraction = Fraction(0);
+    pub const Half: Fraction = Fraction(2);
+    pub const Quarter: Fraction = Fraction(4);
+    pub const Eighth: Fraction = Fraction(8);
+    pub const Sixteenth: Fraction = Fraction(16);
+    pub const ThirtySecond: Fraction = Fraction(32);
+    pub const SixtyFourth: Fraction = Fraction(64);
+    pub const HundredTwentyEighth: Fraction = Fraction(128);
+    pub const TwoHundredFiftySixth: Fraction = Fraction(256);
+
+    /// The plain fractions — no fraction, then each power of two.
     const ALL: [Fraction; 9] = [
         Fraction::None,
         Fraction::Half,
@@ -205,62 +224,55 @@ impl Fraction {
         Fraction::TwoHundredFiftySixth,
     ];
 
+    /// One `denom`-th of a whole note, the denominator held to
+    /// `1..=`[`MAX_DENOM`].
+    fn of(denom: u16) -> Fraction {
+        Fraction(denom.clamp(1, MAX_DENOM))
+    }
+
+    /// Length of `num` of this fraction in grid units, to the nearest unit —
+    /// exact for every denominator that divides [`UNITS_PER_WHOLE`]. Rounded as
+    /// one product, so seven 1/17s are as close to 7/17 as a unit allows rather
+    /// than seven roundings added up.
+    fn units_times(self, num: u8) -> i64 {
+        match self.0 as i64 {
+            0 => 0,
+            d => (num as i64 * UNITS_PER_WHOLE + d / 2) / d,
+        }
+    }
+
     /// Length in grid units.
     fn units(self) -> i64 {
-        match self {
-            Fraction::None => 0,
-            Fraction::Half => UNITS_PER_WHOLE / 2,
-            Fraction::Quarter => UNITS_PER_WHOLE / 4,
-            Fraction::Eighth => UNITS_PER_WHOLE / 8,
-            Fraction::Sixteenth => UNITS_PER_WHOLE / 16,
-            Fraction::ThirtySecond => UNITS_PER_WHOLE / 32,
-            Fraction::SixtyFourth => UNITS_PER_WHOLE / 64,
-            Fraction::HundredTwentyEighth => UNITS_PER_WHOLE / 128,
-            Fraction::TwoHundredFiftySixth => 1,
-        }
+        self.units_times(1)
     }
 
     /// What the fraction is named after — the `8` of a `1/8`. [`Fraction::None`]
     /// is not a fraction at all, so it answers `1`, the denominator that changes
     /// nothing.
     fn denom(self) -> i64 {
-        match self.units() {
-            0 => 1,
-            units => UNITS_PER_WHOLE / units,
+        (self.0 as i64).max(1)
+    }
+
+    fn label(self) -> String {
+        match self.0 {
+            0 => "—".to_string(),
+            d => format!("1/{d}"),
         }
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            Fraction::None => "—",
-            Fraction::Half => "1/2",
-            Fraction::Quarter => "1/4",
-            Fraction::Eighth => "1/8",
-            Fraction::Sixteenth => "1/16",
-            Fraction::ThirtySecond => "1/32",
-            Fraction::SixtyFourth => "1/64",
-            Fraction::HundredTwentyEighth => "1/128",
-            Fraction::TwoHundredFiftySixth => "1/256",
-        }
-    }
-
-    /// How `num` of this fraction reads: three eighths as `3/8`. One of them is
-    /// just the fraction's own name, and `None` has nothing to count.
+    /// How `num` of this fraction reads: three eighths as `3/8`. `None` has
+    /// nothing to count.
     fn label_times(self, num: u8) -> String {
-        match (self, num) {
-            (Fraction::None, _) | (_, 1) => self.label().to_string(),
-            _ => format!("{num}/{}", self.denom()),
+        match self.0 {
+            0 => self.label(),
+            d => format!("{num}/{d}"),
         }
     }
 }
 
 /// A length: a whole-note count plus so many of a fraction, added together.
-/// Each part is picked in its own select box, which is why they are stored apart
+/// Each part is typed into its own box, which is why they are stored apart
 /// rather than as a single unit count.
-///
-/// The nominator is what lets a frame say `3/8`: the fraction box halves all the
-/// way down, so every length it can name on its own is a power of two, and the
-/// dotted values that most music is full of are not among them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Duration {
     /// Whole notes, `0..=`[`MAX_WHOLES`].
@@ -300,7 +312,7 @@ impl Duration {
     }
 
     fn units(self) -> i64 {
-        self.wholes as i64 * UNITS_PER_WHOLE + self.num as i64 * self.frac.units()
+        self.wholes as i64 * UNITS_PER_WHOLE + self.frac.units_times(self.num)
     }
 
     /// The closest length the three boxes can name to `secs`, at `spu` seconds
@@ -369,10 +381,15 @@ impl Duration {
         if rem == 0 {
             return Some(Duration::new(wholes as u16, Fraction::None));
         }
-        for frac in Fraction::ALL {
-            let f = frac.units();
-            if f > 0 && rem % f == 0 && rem / f <= MAX_NUM as i64 {
-                return Some(Duration::with_num(wholes as u16, (rem / f) as u8, frac));
+        // The plain fractions first, coarsest first, then every other
+        // denominator there is: a length is named in halves and quarters when
+        // it can be, and in thirds or fifths only when nothing plainer says it.
+        let plain = Fraction::ALL.into_iter().filter(|f| *f != Fraction::None);
+        let any = (1..=MAX_DENOM).map(Fraction::of);
+        for frac in plain.chain(any) {
+            let num = (rem * frac.denom() + UNITS_PER_WHOLE / 2) / UNITS_PER_WHOLE;
+            if (1..=MAX_NUM as i64).contains(&num) && frac.units_times(num as u8) == rem {
+                return Some(Duration::with_num(wholes as u16, num as u8, frac));
             }
         }
         None
@@ -381,11 +398,49 @@ impl Duration {
     /// `units` spread over as few lengths as the boxes can name it in — what a
     /// silence too odd for one frame is laid out over.
     ///
-    /// Whole by preference: a length [`Duration::exact`] can say is one entry,
-    /// and only a remainder no fraction divides finely enough is chipped away
-    /// coarsest-first. Each step takes more than half of what is left, so this
-    /// is a handful of entries at worst and one entry nearly always.
+    /// Whole by preference: a length [`Duration::exact`] can say is one entry.
+    /// One it cannot is taken apart by denominator: [`UNITS_PER_WHOLE`] is the
+    /// product of [`SPLIT_DENOMS`], which share no factor, so any remainder is
+    /// one fraction of each of them — exactly, give or take a number of whole
+    /// notes that the whole part pays back. That is at most four entries.
+    ///
+    /// Only a length with no whole notes to pay with — a sliver under a few
+    /// whole notes that no sum of fractions reaches — falls through to being
+    /// chipped away longest-first, and may then end a fraction of a 1/256 short.
     fn split(units: i64) -> Vec<Duration> {
+        if units <= 0 {
+            return Vec::new();
+        }
+        if let Some(d) = Duration::exact(units) {
+            return vec![d];
+        }
+        let rem = units % UNITS_PER_WHOLE;
+        let mut parts = Vec::new();
+        let mut sum = 0;
+        for denom in SPLIT_DENOMS {
+            // rem/W = Σ n/d (mod 1), so with m = W/d: n = rem · m⁻¹ (mod d).
+            let m = UNITS_PER_WHOLE / denom;
+            let inverse = (1..denom).find(|i| m % denom * i % denom == 1).unwrap_or(0);
+            let num = rem % denom * inverse % denom;
+            if num > 0 {
+                parts.push(Duration::with_num(0, num as u8, Fraction::of(denom as u16)));
+                sum += num * m;
+            }
+        }
+        let mut wholes = (units - sum) / UNITS_PER_WHOLE;
+        if units >= sum && !parts.is_empty() {
+            for part in &mut parts {
+                part.wholes = wholes.min(MAX_WHOLES as i64) as u16;
+                wholes -= part.wholes as i64;
+            }
+            while wholes > 0 {
+                let w = wholes.min(MAX_WHOLES as i64);
+                parts.push(Duration::new(w as u16, Fraction::None));
+                wholes -= w;
+            }
+            return parts;
+        }
+
         let mut left = units;
         let mut out = Vec::new();
         while left > 0 {
@@ -395,17 +450,22 @@ impl Duration {
             }
             let wholes = (left / UNITS_PER_WHOLE).min(MAX_WHOLES as i64);
             let rem = left - wholes * UNITS_PER_WHOLE;
+            // The longest fraction that still fits, of any denominator: the
+            // one that leaves the least behind for the next entry.
             let mut d = Duration::new(wholes as u16, Fraction::None);
-            for frac in Fraction::ALL {
-                let f = frac.units();
-                if f > 0 && f <= rem {
-                    let num = (rem / f).min(MAX_NUM as i64) as u8;
+            let mut taken = 0;
+            for frac in (1..=MAX_DENOM).map(Fraction::of) {
+                let mut num = (rem * frac.denom() / UNITS_PER_WHOLE).min(MAX_NUM as i64) as u8;
+                // A rounded fraction may land a unit past what is left.
+                if frac.units_times(num) > rem {
+                    num = num.saturating_sub(1);
+                }
+                if num > 0 && frac.units_times(num) > taken {
+                    taken = frac.units_times(num);
                     d = Duration::with_num(wholes as u16, num, frac);
-                    break;
                 }
             }
-            // Nothing left that a 1/256 could take: unreachable while `left`
-            // is positive, and a break rather than a hang if it ever is not.
+            // Less left than the finest fraction there is.
             if d.units() == 0 {
                 break;
             }
@@ -2446,7 +2506,7 @@ impl SequencerPanel {
                         .width(64.0)
                         .selected_text(format!("× {}", self.clone_times))
                         .show_ui(ui, |ui| {
-                            for n in 1..=MAX_NUM {
+                            for n in 1..=MAX_CLONE {
                                 ui.selectable_value(&mut self.clone_times, n, format!("× {n}"));
                             }
                         })
@@ -2892,6 +2952,7 @@ impl SequencerPanel {
             // so it stays put when that note is deleted and leads the next one
             // instead. Drawn only when there is a note for it to lead.
             if !row.items.is_empty() {
+                let in_lead = playhead.is_some_and(|p| p < row.lead.units() as f64);
                 let lead = Self::frame_ui(
                     ui,
                     row_id,
@@ -2899,8 +2960,14 @@ impl SequencerPanel {
                     Frame::Space,
                     &mut row.lead,
                     // The lead belongs to the row, not to an item: there is no
-                    // block it could be part of, and nothing sounds in it.
-                    FrameState { sounding: false, percussion, selected: false, can_align },
+                    // block it could be part of. Nothing sounds in it, but the
+                    // transport passes through it like any other silence.
+                    FrameState {
+                        sounding: in_lead,
+                        percussion,
+                        selected: false,
+                        can_align,
+                    },
                 );
                 if let Some(to) = lead.align {
                     pending_align = Some((None, to));
@@ -2908,8 +2975,18 @@ impl SequencerPanel {
             }
             for (idx, (item, start)) in row.items.iter_mut().zip(starts).enumerate() {
                 let selected = sel.is_some_and(|(a, b)| idx >= a && idx <= b);
-                let sounding = playhead
-                    .is_some_and(|p| p >= start as f64 && p < (start + item.dur.units()) as f64);
+                // Lit for as long as it sounds — and for long enough to be
+                // seen. The transport moves a whole audio block at a time and
+                // the window is painted between blocks, so a 1/32 drum hit is
+                // over before either has looked at it; held for
+                // [`MIN_LIT_SECS`], it is caught every time.
+                //
+                // The silence behind it is where the transport is for the rest
+                // of the item, so a lane always shows where it has got to.
+                let (sounding, in_space) = match playhead {
+                    Some(p) => lit_frames(p, start, item.dur.units(), item.space.units(), spu),
+                    None => (false, false),
+                };
                 // A wav row's note has no pitch to pick: the file plays at the
                 // pitch it was recorded at. What it has instead is a start —
                 // where in the file this note begins.
@@ -2937,7 +3014,7 @@ impl SequencerPanel {
                 // Centred, not merely "into view": a frame scrolled to the edge
                 // is one the next note leaves again immediately, and centring
                 // shows what is coming as well as what is playing.
-                if follow && sounding {
+                if follow && (sounding || in_space) {
                     ui.scroll_to_rect(note.rect, Some(egui::Align::Center));
                 }
                 // The space tied to it, drawn right behind it and carrying no
@@ -2948,9 +3025,10 @@ impl SequencerPanel {
                     item.id,
                     Frame::Space,
                     &mut item.space,
-                    // A space is never *sounding* — it is the silence — but it
-                    // is in the block whenever its note is: they are one item.
-                    FrameState { sounding: false, percussion, selected, can_align },
+                    // A space is never *sounding* — it is the silence — but the
+                    // transport is in it, and it is ringed to say so. It is in
+                    // the block whenever its note is: they are one item.
+                    FrameState { sounding: in_space, percussion, selected, can_align },
                 );
                 if let Some(to) = space.align {
                     pending_align = Some((Some(idx), to));
@@ -3010,6 +3088,9 @@ impl SequencerPanel {
         // playhead's colours — where the transport is beats what is selected,
         // and the border says the rest.
         let (fill, stroke, stroke_w) = match (selected, sounding) {
+            // A silence the transport is passing through keeps its own fill —
+            // nothing is sounding — and wears the playhead's ring.
+            (false, true) if space => (fill, PLAYHEAD, 2.0),
             (false, _) => (fill, stroke, 1.0),
             (true, true) => (fill, SEL_STROKE, 2.0),
             (true, false) => (
@@ -3228,64 +3309,32 @@ impl SequencerPanel {
                         // space that is the point: a 0-length space is a
                         // placeholder that keeps its frame without putting any
                         // silence in the row.
-                        egui::ComboBox::from_id_salt(("wholes", row_id, id, space))
-                            .width(inner_w)
-                            .height(260.0)
-                            .selected_text(format!("{} whole", dur.wholes))
-                            .show_ui(ui, |ui| {
-                                for w in 0..=MAX_WHOLES {
-                                    ui.selectable_value(&mut dur.wholes, w, format!("{w} whole"));
-                                }
-                            })
-                            .response
-                            .on_hover_text("Whole notes — the whole part of the length");
-
-                        // The nominator, drawn over the fraction it counts, so
-                        // the two boxes read down the card as the fraction they
-                        // make: `× 3` over `1/8` is three eighths.
-                        //
-                        // Disabled while there is no fraction: it would multiply
-                        // nothing, and a box that says `× 3` over a length that
-                        // is a whole number of whole notes is simply a lie about
-                        // what is playing.
-                        ui.add_enabled_ui(dur.frac != Fraction::None, |ui| {
-                            egui::ComboBox::from_id_salt(("num", row_id, id, space))
-                                .width(inner_w)
-                                .height(260.0)
-                                .selected_text(format!("× {}", dur.num))
-                                .show_ui(ui, |ui| {
-                                    for n in 1..=MAX_NUM {
-                                        ui.selectable_value(&mut dur.num, n, format!("× {n}"));
-                                    }
-                                })
-                                .response
-                                .on_hover_text(
-                                    "How many of the fraction below — the nominator. \
-                                     Three of a 1/8 is 3/8, the dotted quarter the \
-                                     fraction box cannot name on its own, and it counts \
-                                     for a space exactly as it does for a note.\n\n\
-                                     Needs a fraction to count: pick one below first.",
-                                );
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            number_box(
+                                ui,
+                                egui::Id::new(("wholes", row_id, id, space)),
+                                &mut dur.wholes,
+                                0..=MAX_WHOLES,
+                                inner_w - 58.0,
+                            )
+                            .on_hover_text(format!(
+                                "Whole notes — the whole part of the length. Type a \
+                                 number, 0 to {MAX_WHOLES}."
+                            ));
+                            ui.label("whole");
                         });
-
-                        egui::ComboBox::from_id_salt(("frac", row_id, id, space))
-                            .width(inner_w)
-                            .selected_text(dur.frac.label())
-                            .show_ui(ui, |ui| {
-                                for f in Fraction::ALL {
-                                    ui.selectable_value(&mut dur.frac, f, f.label());
-                                }
-                            })
-                            .response
-                            .on_hover_text(
-                                "Fractional part of the length, down to a 1/256 — taken \
-                                 as many times as the nominator above says, and added to \
-                                 the whole notes",
+                        // The fraction, written the way a fraction is: a plus,
+                        // the nominator, a slash, the denominator.
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            fraction_boxes(
+                                ui,
+                                egui::Id::new(("frac", row_id, id, space)),
+                                dur,
+                                (inner_w - 42.0) / 2.0,
                             );
-
-                        // The boxes are free to leave the nominator counting a
-                        // fraction that is no longer there; the length is not.
-                        dur.canonicalise();
+                        });
                     });
             },
         );
@@ -3592,8 +3641,8 @@ impl SequencerPanel {
     }
 }
 
-/// The three select boxes that name a length — whole notes, how many of a
-/// fraction, and which fraction — laid along a line. Answers whether they
+/// The three boxes that name a length — whole notes, then the fraction's
+/// nominator and denominator — laid along a line. Answers whether they
 /// changed it.
 ///
 /// The same three a frame carries, in the same order and saying the same
@@ -3603,63 +3652,94 @@ impl SequencerPanel {
 /// stacks them, a toolbar lays them out — which is why this is a function of
 /// its own rather than a call into [`SequencerPanel::frame_ui`]. The one
 /// difference is the whole-note count, which goes up to [`MAX_REPEAT_WHOLES`]
-/// here and so is typed or dragged rather than picked off a list.
+/// here.
 ///
 /// Change is reported by comparing the length rather than by asking the boxes:
-/// a combo answers `changed()` for the *button*, not for the popup (see the
-/// instrument select box above), and picking the value that was already there is not
-/// a change to anything but the widget.
+/// typing the value that was already there is not a change to anything but the
+/// widget.
 fn length_boxes(ui: &mut egui::Ui, salt: &'static str, dur: &mut Duration) -> bool {
     let before = *dur;
-    // A value to drag or type rather than a list to pick from: a repeat window
-    // reaches thousands of whole notes into a long piece.
-    ui.add(
-        egui::DragValue::new(&mut dur.wholes)
-            .range(0..=MAX_REPEAT_WHOLES)
-            .speed(0.25)
-            .suffix(" whole"),
-    )
-    .on_hover_text("Whole notes — the whole part of the length. Drag or type.");
-    // The greying-out gets a horizontal region of its own: a scope nested in a
-    // line inherits the *line's* full height and centres what is in it there, so
-    // one wrapped straight round a box drops it a few pixels below its
-    // neighbours — which on a row of six boxes reads as a staircase.
-    ui.add_enabled_ui(dur.frac != Fraction::None, |ui| {
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt((salt, "num"))
-                .width(60.0)
-                .height(260.0)
-                .selected_text(format!("× {}", dur.num))
-                .show_ui(ui, |ui| {
-                    for n in 1..=MAX_NUM {
-                        ui.selectable_value(&mut dur.num, n, format!("× {n}"));
-                    }
-                })
-                .response
-                .on_hover_text(
-                    "How many of the fraction beside it — three of a 1/8 is 3/8, \
-                     the dotted quarter the fraction box cannot name on its \
-                     own.\n\nNeeds a fraction to count: pick one first.",
-                );
-        });
-    });
-    egui::ComboBox::from_id_salt((salt, "frac"))
-        .width(72.0)
-        .selected_text(dur.frac.label())
-        .show_ui(ui, |ui| {
-            for f in Fraction::ALL {
-                ui.selectable_value(&mut dur.frac, f, f.label());
-            }
-        })
-        .response
-        .on_hover_text(
-            "Fractional part of the length, down to a 1/256 — taken as many times \
-             as the nominator says, and added to the whole notes",
-        );
-    // The boxes are free to leave the nominator counting a fraction that is no
-    // longer there; the length is not.
-    dur.canonicalise();
+    number_box(ui, egui::Id::new((salt, "wholes")), &mut dur.wholes, 0..=MAX_REPEAT_WHOLES, 44.0)
+        .on_hover_text(format!(
+            "Whole notes — the whole part of the length. Type a number, 0 to \
+             {MAX_REPEAT_WHOLES}."
+        ));
+    ui.label("whole");
+    fraction_boxes(ui, egui::Id::new((salt, "frac")), dur, 40.0);
     *dur != before
+}
+
+/// A box a whole number is typed into, held to `range`. Answers the box's
+/// response; the value follows the typing, key by key.
+///
+/// While the box has the keyboard it shows what was typed rather than the value,
+/// so it can be emptied on the way to another number without snapping back to
+/// the old one under the cursor. A number past the top of the range is cut down
+/// to it as it is typed; one below the bottom — or nothing at all — leaves the
+/// value where it was, and the box says so again once it is left.
+fn number_box(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    value: &mut u16,
+    range: std::ops::RangeInclusive<u16>,
+    width: f32,
+) -> egui::Response {
+    let typed = id.with("typed");
+    let mut text = ui
+        .data(|d| d.get_temp::<String>(typed))
+        .unwrap_or_else(|| value.to_string());
+    let resp = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .desired_width(width)
+            .horizontal_align(egui::Align::Center),
+    );
+    if resp.changed() {
+        text.retain(|c| c.is_ascii_digit());
+        if let Ok(n) = text.parse::<u32>() {
+            if n > *range.end() as u32 {
+                text = range.end().to_string();
+                *value = *range.end();
+            } else if n >= *range.start() as u32 {
+                *value = n as u16;
+            }
+        }
+    }
+    if resp.has_focus() {
+        ui.data_mut(|d| d.insert_temp(typed, text));
+    } else {
+        ui.data_mut(|d| d.remove::<String>(typed));
+    }
+    resp
+}
+
+/// The fractional part of a length as two typed boxes that read as the fraction
+/// they make: `+ 3 / 8` is three eighths on top of the whole notes.
+///
+/// A nominator of zero is a length with no fraction. The denominator typed
+/// beside it is remembered while it counts nothing, so a frame can be taken to
+/// `0 / 3` and on to `2 / 3` without the three being typed twice.
+fn fraction_boxes(ui: &mut egui::Ui, id: egui::Id, dur: &mut Duration, width: f32) {
+    let kept = id.with("denom");
+    let mut num = if dur.frac == Fraction::None { 0 } else { dur.num as u16 };
+    let mut denom = if dur.frac == Fraction::None {
+        ui.data(|d| d.get_temp::<u16>(kept)).unwrap_or(4)
+    } else {
+        dur.frac.denom() as u16
+    };
+    ui.label("+");
+    number_box(ui, id.with("num"), &mut num, 0..=MAX_NUM as u16, width).on_hover_text(format!(
+        "Nominator of the fractional part — how many of the fraction. 3 over 8 is \
+         3/8, a dotted quarter. Type 0 to {MAX_NUM}; 0 is no fraction at all."
+    ));
+    ui.label("/");
+    number_box(ui, id.with("den"), &mut denom, 1..=MAX_DENOM, width).on_hover_text(format!(
+        "Denominator of the fractional part — which fraction of a whole note is \
+         counted. 4 is quarters, 3 is thirds (triplets). Type 1 to {MAX_DENOM}."
+    ));
+    ui.data_mut(|d| d.insert_temp(kept, denom));
+    let frac = if num == 0 { Fraction::None } else { Fraction::of(denom) };
+    *dur = Duration::with_num(dur.wholes, num as u8, frac);
 }
 
 /// Widget id of a row's lead space frame. Item ids count up from zero and are
@@ -3748,7 +3828,8 @@ impl AlignTo {
 /// about which is which.
 #[derive(Clone, Copy)]
 struct FrameState {
-    /// The transport is inside this note.
+    /// The transport is on this frame: a note that is sounding, or a silence
+    /// it is passing through.
     sounding: bool,
     /// Its row plays a drum kit, so its pitches are named after drums.
     percussion: bool,
@@ -3775,6 +3856,25 @@ struct FrameOut {
 /// Colour of the transport's position readout, and of the frame sounding under
 /// it.
 const PLAYHEAD: egui::Color32 = egui::Color32::from_rgb(240, 120, 110);
+
+/// The least time a note frame stays lit once the transport reaches it, however
+/// short the note: long enough to outlast an audio block and a repaint.
+const MIN_LIT_SECS: f64 = 0.12;
+
+/// Which of an item's two frames the transport lights at `playhead`: the note,
+/// and the space behind it. `start` is where the note begins; all in units.
+///
+/// The note is lit while it sounds, and for no less than [`MIN_LIT_SECS`]; the
+/// space from the note's end to the item's. A short note is therefore lit
+/// together with the start of its own space, and a note of no length — a
+/// placeholder — is never lit at all.
+fn lit_frames(playhead: f64, start: i64, dur: i64, space: i64, spu: f64) -> (bool, bool) {
+    let (start, note_end) = (start as f64, (start + dur) as f64);
+    let lit_end = note_end.max(start + MIN_LIT_SECS / spu.max(1e-12));
+    let note = dur > 0 && playhead >= start && playhead < lit_end;
+    let in_space = playhead >= note_end && playhead < note_end + space as f64;
+    (note, in_space)
+}
 
 /// Colour of the record button and of a take's note count.
 const RECORD: egui::Color32 = egui::Color32::from_rgb(235, 90, 90);
@@ -4175,7 +4275,7 @@ mod tests {
             UNITS_PER_WHOLE * 3 / 4
         );
         // Every fraction is a whole number of units, halving down to a 1/256.
-        assert_eq!(Fraction::TwoHundredFiftySixth.units(), 1);
+        assert_eq!(Fraction::TwoHundredFiftySixth.units(), UNITS_PER_WHOLE / 256);
         for pair in Fraction::ALL[1..].windows(2) {
             assert_eq!(pair[1].units(), pair[0].units() / 2);
         }
@@ -4217,8 +4317,95 @@ mod tests {
         // It reaches the top of the box without overflowing the grid.
         assert_eq!(
             Duration::with_num(MAX_WHOLES, MAX_NUM, Fraction::Half).units(),
-            UNITS_PER_WHOLE * (MAX_WHOLES as i64 + MAX_NUM as i64 / 2),
+            UNITS_PER_WHOLE * MAX_WHOLES as i64 + UNITS_PER_WHOLE * MAX_NUM as i64 / 2,
         );
+    }
+
+    /// The length boxes are typed into. A number past the top of a box's range
+    /// is cut down to it, a nominator of zero is no fraction at all, and the
+    /// denominator can be any number — a 3 makes triplets.
+    #[test]
+    fn a_length_is_typed_into_its_boxes() {
+        fn type_into(ctx: &egui::Context, dur: &mut Duration, which: &str, text: &str) {
+            let id = egui::Id::new("len");
+            let mut frame = |events: Vec<egui::Event>, focus: bool| {
+                let input = egui::RawInput { events, ..Default::default() };
+                let _ = ctx.run(input, |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        if focus {
+                            ui.memory_mut(|m| m.request_focus(id.with(which)));
+                        }
+                        ui.horizontal(|ui| {
+                            number_box(ui, id.with("wholes"), &mut dur.wholes, 0..=MAX_WHOLES, 40.0);
+                            fraction_boxes(ui, id, dur, 30.0);
+                        });
+                    });
+                });
+            };
+            frame(Vec::new(), true);
+            let select_all = egui::Event::Key {
+                key: egui::Key::A,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::COMMAND,
+            };
+            frame(vec![select_all], false);
+            frame(vec![egui::Event::Text(text.to_string())], false);
+            // Leave the box, as a click elsewhere would.
+            ctx.memory_mut(|m| m.surrender_focus(id.with(which)));
+            frame(Vec::new(), false);
+        }
+
+        let ctx = egui::Context::default();
+        let mut dur = Duration::new(0, Fraction::Quarter);
+        type_into(&ctx, &mut dur, "wholes", "12");
+        assert_eq!(dur, Duration::new(12, Fraction::Quarter));
+        type_into(&ctx, &mut dur, "wholes", "5000");
+        assert_eq!(dur.wholes, MAX_WHOLES, "the whole notes stop at the top of their range");
+
+        type_into(&ctx, &mut dur, "num", "255");
+        assert_eq!(dur, Duration::with_num(MAX_WHOLES, 255, Fraction::Quarter));
+        type_into(&ctx, &mut dur, "den", "3");
+        assert_eq!(dur, Duration::with_num(MAX_WHOLES, 255, Fraction::of(3)));
+        type_into(&ctx, &mut dur, "den", "999");
+        assert_eq!(dur.frac, Fraction::of(MAX_DENOM));
+        // A denominator of nothing is not a fraction: the length keeps the one
+        // it had.
+        type_into(&ctx, &mut dur, "den", "0");
+        assert_eq!(dur.frac, Fraction::of(MAX_DENOM));
+
+        // No nominator is no fraction — and the denominator waits for the next.
+        type_into(&ctx, &mut dur, "den", "7");
+        type_into(&ctx, &mut dur, "num", "0");
+        assert_eq!(dur, Duration::new(MAX_WHOLES, Fraction::None));
+        type_into(&ctx, &mut dur, "num", "2");
+        assert_eq!(dur, Duration::with_num(MAX_WHOLES, 2, Fraction::of(7)));
+    }
+
+    /// A drum hit is a 1/32 — 42 ms at 178 BPM — and the transport is read once
+    /// per painted frame after moving a whole audio block. A note lit only
+    /// while it sounds is one the window mostly never sees, so a row of short
+    /// notes ran dark; it is held long enough to be caught, and the silence
+    /// behind it shows where the transport is the rest of the time.
+    #[test]
+    fn a_short_note_is_lit_long_enough_to_be_seen() {
+        let spu = 60.0 / 178.0 / UNITS_PER_BEAT as f64;
+        let (dur, space) = (UNITS_PER_WHOLE / 32, UNITS_PER_WHOLE * 7 / 32);
+        let at = |secs: f64| lit_frames(secs / spu, 0, dur, space, spu);
+        assert_eq!(at(0.0), (true, false));
+        // Past the end of the note, on a transport that only moves a block at a
+        // time: still lit, and its space with it.
+        assert_eq!(at(0.100), (true, true));
+        assert_eq!(at(0.130), (false, true));
+        // The item ends where the next one starts.
+        assert_eq!(at((dur + space) as f64 * spu), (false, false));
+        // A long note is lit for exactly as long as it sounds.
+        let long = lit_frames(UNITS_PER_WHOLE as f64 - 1.0, 0, UNITS_PER_WHOLE, 0, spu);
+        assert_eq!(long, (true, false));
+        assert_eq!(lit_frames(UNITS_PER_WHOLE as f64, 0, UNITS_PER_WHOLE, 0, spu), (false, false));
+        // A placeholder plays nothing and lights nothing but its silence.
+        assert_eq!(lit_frames(0.0, 0, 0, space, spu), (false, true));
     }
 
     /// A nominator with no fraction under it would multiply nothing, so the
@@ -4469,7 +4656,7 @@ mod tests {
 
         // A recording longer than the boxes can say gets the longest they can.
         assert_eq!(
-            Duration::closest_to(1000.0, spu),
+            Duration::closest_to(1.0e6, spu),
             Duration::with_num(MAX_WHOLES, MAX_NUM, Fraction::Half)
         );
     }
@@ -4480,12 +4667,12 @@ mod tests {
     #[test]
     fn a_fit_that_is_not_exact_says_which_way_it_missed() {
         let spu = 0.5 / UNITS_PER_BEAT as f64;
-        // D5.wav: 5.81 s, which no length at 120 BPM names — the nominator stops
-        // at sixteen, so the nearest is 2 + 7/8 (5.75 s), 60 ms short.
+        // D5.wav: 5.81 s, which no length at 120 BPM names — the nearest is
+        // 2 + 29/32 (5.8125 s), 2.5 ms long.
         let fitted = Duration::closest_to(5.81, spu);
-        assert_eq!(fitted, Duration::with_num(2, 7, Fraction::Eighth));
-        assert!((fitted.error_secs(5.81, spu) + 0.06).abs() < 1e-6);
-        assert!(fit_hint(5.81, fitted, spu).contains("60 ms short"), "{}", fit_hint(5.81, fitted, spu));
+        assert_eq!(fitted, Duration::with_num(2, 29, Fraction::ThirtySecond));
+        assert!((fitted.error_secs(5.81, spu) - 0.0025).abs() < 1e-6);
+        assert!(fit_hint(5.81, fitted, spu).contains("long"), "{}", fit_hint(5.81, fitted, spu));
 
         // An exact fit says so rather than showing a rounded zero.
         let exact = Duration::closest_to(2.0, spu);
@@ -4561,20 +4748,25 @@ mod tests {
         // The note frame says what it plays and how long for, and carries the
         // start over the three length boxes; the space carries the three alone.
         for (header, width, boxes) in [
-            ("wav · 3/8", WAV_CARD_W, vec!["1.250s", "0 whole", "× 3", "1/8"]),
-            ("space · 1/4", CARD_W, vec!["0 whole", "× 1", "1/4"]),
+            ("wav · 3/8", WAV_CARD_W, vec!["1.250s", "0", "whole", "+", "3", "/", "8"]),
+            ("space · 1/4", CARD_W, vec!["0", "whole", "+", "1", "/", "4"]),
         ] {
             let found: Vec<egui::Pos2> =
                 texts.iter().filter(|(t, _)| t == header).map(|(_, p)| *p).collect();
             assert_eq!(found.len(), 1, "{header:?} is painted {} times: {texts:?}", found.len());
             let top = found[0];
+            let card = *cards.iter().find(|c| c.contains(top)).expect("a header sits on a card");
+            assert!(card.width() <= width, "the {header:?} card is {} wide", card.width());
             let mut column: Vec<&(String, egui::Pos2)> = texts
                 .iter()
-                .filter(|(_, p)| {
-                    p.y > top.y && p.y < top.y + CARD_H && p.x <= top.x && p.x > top.x - width
-                })
+                .filter(|(_, p)| p.y > top.y && card.contains(*p))
                 .collect();
-            column.sort_by(|a, b| a.1.y.total_cmp(&b.1.y));
+            // Line by line, and left to right along each: a length is a row
+            // of boxes now, and text on one line sits within a pixel of it.
+            column.sort_by(|a, b| {
+                let line = |p: &egui::Pos2| (p.y / 8.0).round();
+                line(&a.1).total_cmp(&line(&b.1)).then(a.1.x.total_cmp(&b.1.x))
+            });
             let painted: Vec<&str> = column.iter().map(|(t, _)| t.as_str()).collect();
             assert_eq!(painted, boxes, "the {header:?} card's boxes: {texts:?}");
         }
@@ -4668,9 +4860,9 @@ mod tests {
         // of the *card* rather than of one string: a box that landed on the
         // neighbouring card, or one that did not draw at all, changes the list.
         for (header, boxes) in [
-            ("lead · 0", vec!["0 whole", "× 1", "—"]),
-            ("C4 · 3/8", vec!["C4", "0 whole", "× 3", "1/8"]),
-            ("space · 1 + 5/16", vec!["1 whole", "× 5", "1/16"]),
+            ("lead · 0", vec!["0", "whole", "+", "0", "/", "4"]),
+            ("C4 · 3/8", vec!["C4", "0", "whole", "+", "3", "/", "8"]),
+            ("space · 1 + 5/16", vec!["1", "whole", "+", "5", "/", "16"]),
         ] {
             let top = at(header);
             let card = *cards
@@ -4681,14 +4873,14 @@ mod tests {
                 .iter()
                 .filter(|(_, p)| p.y > top.y && card.contains(*p))
                 .collect();
-            column.sort_by(|a, b| a.1.y.total_cmp(&b.1.y));
+            // Line by line, and left to right along each: a length is a row
+            // of boxes now, and text on one line sits within a pixel of it.
+            column.sort_by(|a, b| {
+                let line = |p: &egui::Pos2| (p.y / 8.0).round();
+                line(&a.1).total_cmp(&line(&b.1)).then(a.1.x.total_cmp(&b.1.x))
+            });
             let painted: Vec<&str> = column.iter().map(|(t, _)| t.as_str()).collect();
             assert_eq!(painted, boxes, "the {header:?} card's boxes: {texts:?}");
-            // One column, not two cards' worth read as one.
-            assert!(
-                column.iter().all(|(_, p)| (p.x - column[0].1.x).abs() < 1.0),
-                "the {header:?} card's boxes are not in one column: {column:?}"
-            );
             // The last box, its text and all, still inside the card it belongs
             // to: CARD_H has to grow with the number of boxes.
             let last = column.last().expect("a card draws its boxes").1.y;
@@ -5232,31 +5424,48 @@ mod tests {
     }
 
     /// A gap between copies is arithmetic, not a length anyone picked, so it is
-    /// not always a length the three select boxes can name — `255/256` needs
-    /// 255 of the smallest fraction there is. It still has to land *exactly*,
+    /// not always a length the three boxes can name — a whole note less a 1/256
+    /// and a 1/225 is counted in 57600ths. It still has to land *exactly*,
     /// because a rounded gap is a copy that drifts further out of step with
     /// every repeat, so what will not fit in one frame is laid out over frames
     /// of no length: silence, which is what a gap is.
     #[test]
     fn a_gap_no_length_box_can_name_is_still_exact() {
-        assert_eq!(Duration::exact(255), None, "no fraction divides 255 units few enough times");
-        assert_eq!(Duration::split(255).iter().map(|d| d.units()).sum::<i64>(), 255);
+        let w = UNITS_PER_WHOLE;
+        let odd = 2 * w - w / 256 - w / 225;
+        assert_eq!(Duration::exact(odd), None, "no fraction is fine enough to say it");
+        assert_eq!(Duration::split(odd).iter().map(|d| d.units()).sum::<i64>(), odd);
+        assert!(Duration::split(odd).len() <= 4);
+        assert_eq!(
+            Duration::exact(255 * w / 256),
+            Some(Duration::with_num(0, 255, Fraction::TwoHundredFiftySixth)),
+            "the nominator reaches every 256th there is"
+        );
+        assert_eq!(
+            Duration::exact(w + 2 * w / 3),
+            Some(Duration::with_num(1, 2, Fraction::of(3))),
+            "a triplet is a length like any other"
+        );
         assert_eq!(
             Duration::exact(UNITS_PER_WHOLE + 3 * EIGHTH),
             Some(Duration::with_num(1, 3, Fraction::Eighth)),
             "and a length that can be named is named the plainest way"
         );
+        // Whatever is asked for, long or short, comes back whole.
+        for units in [w / 3 + w / 5 + w / 7, 5 * w + w / 11 + w / 256, 3000 * w + w / 13 + w / 9] {
+            assert_eq!(Duration::split(units).iter().map(|d| d.units()).sum::<i64>(), units);
+        }
 
-        // A whole note against a single 1/256: the short row has 255 units of
-        // window to make up between one copy and the next.
+        // Two whole notes against a 1/256 followed by a 1/225 of silence: the
+        // short row has the odd length above to make up between copies.
         let mut panel = panel_with_rows(&[
-            &[(60, Duration::new(1, Fraction::None), frac(Fraction::None))],
-            &[(36, frac(Fraction::TwoHundredFiftySixth), frac(Fraction::None))],
+            &[(60, Duration::new(2, Fraction::None), frac(Fraction::None))],
+            &[(36, frac(Fraction::TwoHundredFiftySixth), frac(Fraction::of(225)))],
         ]);
         panel.select_all();
         panel.clone_block(2);
 
-        let w = UNITS_PER_WHOLE;
+        let w = 2 * UNITS_PER_WHOLE;
         assert_eq!(
             note_starts(&panel),
             vec![vec![0, w, 2 * w], vec![0, w, 2 * w]],

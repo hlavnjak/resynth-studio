@@ -463,7 +463,7 @@ mod tests {
     /// after it moves. This is the whole reason placeholder frames exist.
     #[test]
     fn a_silence_is_split_exactly() {
-        for units in [1, EIGHTH, QUARTER + EIGHTH, WHOLE * 3 + SIXTEENTH, 4321] {
+        for units in [WHOLE / 256, EIGHTH, QUARTER + EIGHTH, WHOLE * 3 + SIXTEENTH, 4321 * WHOLE / 256] {
             let terms = split_units(units);
             assert_eq!(
                 terms.iter().map(|d| d.units()).sum::<i64>(),
@@ -493,7 +493,7 @@ mod tests {
         assert_eq!(nearest_duration(QUARTER + EIGHTH + 1).units(), HALF);
         // Longer than anything the boxes can say: the longest they can.
         assert_eq!(
-            nearest_duration(WHOLE * 100).units(),
+            nearest_duration(WHOLE * (MAX_WHOLES as i64 + 100)).units(),
             WHOLE * MAX_WHOLES as i64 + HALF
         );
     }

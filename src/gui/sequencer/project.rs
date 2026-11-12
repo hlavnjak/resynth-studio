@@ -95,7 +95,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use super::{Duration, Fraction, Item};
+use super::{Duration, Fraction, Item, MAX_DENOM};
 
 /// What this writer produces. A reader accepts anything up to it.
 const VERSION: u32 = 1;
@@ -633,11 +633,11 @@ fn frac_from_token(t: &str) -> Result<(u8, Fraction)> {
              fraction at all writes \"none\""
         );
     }
-    let denom: i64 = d.parse().with_context(bad)?;
-    let frac = Fraction::ALL
-        .into_iter()
-        .find(|f| *f != Fraction::None && f.denom() == denom)
-        .with_context(bad)?;
+    let denom: u16 = d.parse().with_context(bad)?;
+    if !(1..=MAX_DENOM).contains(&denom) {
+        bail!("a note fraction is a 1/1 to a 1/{MAX_DENOM}: {t:?}");
+    }
+    let frac = Fraction::of(denom);
     Ok((num, frac))
 }
 
@@ -926,7 +926,10 @@ mod tests {
         // A fraction that is no fraction at all is `none`, not a zero nominator:
         // the file is refused rather than read as some other length.
         assert!(read_duration("0 0/8").is_err());
-        assert!(read_duration("0 1/7").is_err());
+        assert!(read_duration("0 1/257").is_err());
+        // Any denominator the boxes take is a fraction — a 1/7 as much as a 1/8.
+        assert_eq!(read_duration("0 2/7").unwrap().units(), UNITS_PER_WHOLE * 2 / 7);
+        assert_eq!(write_duration(read_duration("3 2/7").unwrap()), "3 2/7");
         assert!(read_duration("0 3").is_err());
     }
 
