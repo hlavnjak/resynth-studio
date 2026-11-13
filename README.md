@@ -12,10 +12,11 @@ is the VST3/CLAP plugin that does the analysis and synthesis, and ReSynth Studio
 is the host that feeds it recordings.
 
 <p align="center">
-  <img src="assets/track_0.2.0_1.png" alt="ReSynth Studio 0.2.0: Instruments panel and Sequencer rows" width="800">
+  <img src="assets/resynth_studio_0.4.0_1.png" alt="ReSynth Studio 0.4.0: Instruments panel and Sequencer rows" width="100%">
 </p>
 <p align="center">
-  <img src="assets/track_0.2.0_2.png" alt="ReSynth Studio 0.2.0: Sequencer transport and repeat window, MIDI and Resynthesis panels" width="800">
+  <img src="assets/resynth_studio_0.4.0_2.png" alt="ReSynth Studio 0.4.0: Sequencer transport and repeat window, MIDI panel with the Plays instrument picker" width="49%">
+  <img src="assets/resynth_studio_0.4.0_3.png" alt="ReSynth Studio 0.4.0: Resynthesis panel with the pitched subtracks found in a recording" width="49%">
 </p>
 
 ## Headline feature — Resynthesis
