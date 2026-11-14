@@ -172,6 +172,11 @@ struct PluginInstrument {
     /// keeps the knobs the user set. Captured when the editor closes and restored
     /// when it opens, so the sound survives the window and reaches the Sequencer.
     vst_state: Option<Vec<u8>>,
+    /// The `.lsft` this instrument was loaded from or last exported to — where
+    /// "Save" writes. `None` for an instrument that has never been in a file of
+    /// its own (a new one, or one a project brought in), which is what keeps
+    /// the button disabled until "Export…" has named one.
+    lsft_path: Option<PathBuf>,
     /// Which keyboard plays this instrument, by port name. `None` follows whatever
     /// the MIDI panel is connected to, which is what every instrument does until it
     /// is pointed somewhere else.
@@ -242,6 +247,41 @@ impl PluginInstrument {
     /// Whether this instrument's live grid can be exported (LeSynth, editor open).
     fn can_export(&self) -> bool {
         self.kind == InstrumentKind::LeSynth && self.editor.is_some()
+    }
+
+    /// Whether "Save" has both somewhere to write and something to write: a
+    /// `.lsft` the instrument came from or was exported to, and a grid — the
+    /// open editor's, or the one kept from when it was last closed.
+    fn can_save(&self) -> bool {
+        self.kind == InstrumentKind::LeSynth
+            && self.lsft_path.is_some()
+            && (self.editor.is_some() || self.import_state.is_some())
+    }
+
+    /// What a `.lsft` of this instrument holds right now: the grid, and the
+    /// plugin's own state beside it — the Modulation envelope, "Zero phases on
+    /// keys" and the curve controls, none of which are in the grid.
+    ///
+    /// Read from the open editor when there is one, so the file is what the
+    /// user can hear; otherwise from what was kept when it closed.
+    fn file_snapshot(&self) -> Result<(TrackState, Vec<u8>)> {
+        match &self.editor {
+            Some(editor) => {
+                let grid = editor.export_state()?;
+                let plugin_state = editor
+                    .plugin()
+                    .save_state()
+                    .context("reading the plugin's own state")?;
+                Ok((grid, plugin_state))
+            }
+            None => {
+                let grid = self
+                    .import_state
+                    .clone()
+                    .context("this instrument has no grid to save")?;
+                Ok((grid, self.vst_state.clone().unwrap_or_default()))
+            }
+        }
     }
 
     /// Take what the open editor is playing and keep it on the instrument, so closing
@@ -446,6 +486,7 @@ impl InstrumentsPanel {
             plugin_id: None,
             import_state: None,
             vst_state: None,
+            lsft_path: None,
             midi_source: None,
             feed: None,
             editor: None,
@@ -489,6 +530,7 @@ impl InstrumentsPanel {
             plugin_id,
             import_state: None,
             vst_state: None,
+            lsft_path: None,
             midi_source: None,
             feed: None,
             editor: None,
@@ -680,6 +722,7 @@ impl InstrumentsPanel {
             plugin_id: None,
             import_state: state,
             vst_state,
+            lsft_path: None,
             midi_source: None,
             feed: None,
             editor: None,
@@ -719,6 +762,7 @@ impl InstrumentsPanel {
             plugin_id,
             import_state: None,
             vst_state,
+            lsft_path: None,
             midi_source: None,
             feed: None,
             editor: None,
@@ -745,7 +789,9 @@ impl InstrumentsPanel {
         else {
             return;
         };
-        let state = match TrackState::read(&file) {
+        // The grid, and — from a version 5 file — the plugin's own state:
+        // the Modulation envelope, "Zero phases on keys", the curve controls.
+        let (state, plugin_state) = match TrackState::read_with_plugin_state(&file) {
             Ok(s) => s,
             Err(e) => {
                 self.status = format!("Load failed: {e:#}");
@@ -776,6 +822,9 @@ impl InstrumentsPanel {
             true,
             Some(state.clone()),
         );
+        // Registered too, so the Sequencer plays the envelope the file was
+        // saved with whether or not the editor is ever opened.
+        self.registry.set_vst_state(registry_id, plugin_state.clone());
         self.instruments.push(PluginInstrument {
             id,
             registry_id,
@@ -785,7 +834,8 @@ impl InstrumentsPanel {
             class_id: Some(class_ids::FOURIER_SYNTH),
             plugin_id: None,
             import_state: Some(state),
-            vst_state: None,
+            vst_state: plugin_state,
+            lsft_path: Some(file),
             midi_source: None,
             feed: None,
             editor: None,
@@ -793,18 +843,19 @@ impl InstrumentsPanel {
         self.status = "Loaded LeSynth instrument — open its editor to view.".to_string();
     }
 
-    /// Save an instrument's live grid to a chosen `.lsft` file.
+    /// Save an instrument to a chosen `.lsft` file: its live grid, and the
+    /// plugin's own state beside it. The file becomes the one "Save" writes.
     fn export_instrument(&mut self, idx: usize) {
         // Snapshot first (ends the borrow of `self.instruments` before the dialog).
         let snapshot = self
             .instruments
             .get(idx)
             .filter(|t| t.can_export())
-            .map(|t| (t.name.clone(), t.editor.as_ref().unwrap().export_state()));
+            .map(|t| (t.name.clone(), t.file_snapshot()));
         let Some((name, result)) = snapshot else {
             return;
         };
-        let state = match result {
+        let (state, plugin_state) = match result {
             Ok(s) => s,
             Err(e) => {
                 self.status = format!("Export failed: {e:#}");
@@ -818,9 +869,33 @@ impl InstrumentsPanel {
         else {
             return;
         };
-        self.status = match state.write(&path) {
-            Ok(()) => format!("Exported {name}."),
+        self.status = match state.write_with_plugin_state(&path, &plugin_state) {
+            Ok(()) => {
+                if let Some(instrument) = self.instruments.get_mut(idx) {
+                    instrument.lsft_path = Some(path);
+                }
+                format!("Exported {name}.")
+            }
             Err(e) => format!("Export failed: {e:#}"),
+        };
+    }
+
+    /// Write an instrument back to the `.lsft` it was loaded from or last
+    /// exported to, without asking where.
+    fn save_instrument(&mut self, idx: usize) {
+        let Some(instrument) = self.instruments.get(idx).filter(|t| t.can_save()) else {
+            return;
+        };
+        let Some(path) = instrument.lsft_path.clone() else {
+            return;
+        };
+        let name = &instrument.name;
+        self.status = match instrument
+            .file_snapshot()
+            .and_then(|(state, plugin_state)| state.write_with_plugin_state(&path, &plugin_state))
+        {
+            Ok(()) => format!("Saved {name} to {}.", crate::file_label(&path)),
+            Err(e) => format!("Save failed: {e:#}"),
         };
     }
 
@@ -885,6 +960,7 @@ impl InstrumentsPanel {
             Open(usize),
             Close(usize),
             Export(usize),
+            Save(usize),
             Remove(usize),
         }
         let mut action: Option<Action> = None;
@@ -937,6 +1013,38 @@ impl InstrumentsPanel {
                                             .clicked()
                                     {
                                         action = Some(Action::Export(idx));
+                                    }
+                                    // Save back to the instrument's own file.
+                                    // Always shown on a LeSynth instrument, and
+                                    // disabled until it has one: a button that
+                                    // appears only once a file is named would
+                                    // not say that naming one is what it needs.
+                                    if instrument.kind == InstrumentKind::LeSynth {
+                                        let hover = match &instrument.lsft_path {
+                                            Some(path) => {
+                                                format!("Save to {}", crate::file_label(path))
+                                            }
+                                            None => String::new(),
+                                        };
+                                        if ui
+                                            .add_enabled(
+                                                instrument.can_save(),
+                                                egui::Button::new("💾 Save"),
+                                            )
+                                            .on_hover_text(hover)
+                                            .on_disabled_hover_text(
+                                                if instrument.lsft_path.is_some() {
+                                                    "Open the editor to save this instrument."
+                                                } else {
+                                                    "Nothing to save to yet — this instrument \
+                                                     was not loaded from a .lsft file. Use \
+                                                     Export… once to name one."
+                                                },
+                                            )
+                                            .clicked()
+                                        {
+                                            action = Some(Action::Save(idx));
+                                        }
                                     }
                                 },
                             );
@@ -1039,6 +1147,7 @@ impl InstrumentsPanel {
                 }
             }
             Some(Action::Export(idx)) => self.export_instrument(idx),
+            Some(Action::Save(idx)) => self.save_instrument(idx),
             Some(Action::Remove(idx)) => {
                 if idx < self.instruments.len() {
                     // Nothing to capture: the instrument is going, and with it the

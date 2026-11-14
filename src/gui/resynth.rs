@@ -583,11 +583,16 @@ impl ResynthPanel {
             .get(file_idx)
             .and_then(|f| f.subtracks.get(sub_idx))
             .and_then(|v| v.editor.as_ref())
-            .map(|e| e.export_state());
+            // The grid, and the plugin's own state beside it — the Modulation
+            // envelope and "Zero phases on keys" are not in the grid.
+            .map(|e| {
+                e.export_state()
+                    .and_then(|grid| Ok((grid, e.plugin().save_state()?)))
+            });
         let Some(result) = snapshot else {
             return;
         };
-        let state = match result {
+        let (state, plugin_state) = match result {
             Ok(s) => s,
             Err(e) => {
                 self.status = format!("Export failed: {}", e);
@@ -601,7 +606,7 @@ impl ResynthPanel {
         else {
             return;
         };
-        self.status = match state.write(&path) {
+        self.status = match state.write_with_plugin_state(&path, &plugin_state) {
             Ok(()) => format!("Exported subtrack {} to {}.", sub_idx + 1, crate::file_label(&path)),
             Err(e) => format!("Export failed: {}", e),
         };

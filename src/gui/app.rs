@@ -437,8 +437,11 @@ impl DawApp {
             let full = dir.join(&file);
             // Autosave off with a file already there means "keep what is pinned".
             if autosave.contains(&id) || !full.exists() {
+                // With the plugin's state inside it as well as beside it, so
+                // the file is a whole instrument when it is loaded on its own
+                // from the Instruments panel.
                 state
-                    .write(&full)
+                    .write_with_plugin_state(&full, src.vst_state.as_deref().unwrap_or(&[]))
                     .with_context(|| format!("write {}", crate::file_label(&full)))?;
                 written += 1;
             }
@@ -547,11 +550,16 @@ impl DawApp {
             InstrumentSource::None => None,
             InstrumentSource::LeSynthDefault => self.instruments.adopt_lesynth(name, None, None).ok(),
             InstrumentSource::LeSynth { file, state } => {
-                let grid = crate::track_format::TrackState::read(&dir.join(file)).ok()?;
+                let (grid, embedded) =
+                    crate::track_format::TrackState::read_with_plugin_state(&dir.join(file))
+                        .ok()?;
                 // The controls that drew the grid. A project saved before these
                 // were kept — or one whose file has gone missing — still loads:
                 // the curves come back, the controls under them read as new.
-                let bytes = read_state_file(dir, state.as_deref(), name);
+                // The `.vststate` wins when both exist: with autosave off the
+                // two files can be of different ages, and that is the one the
+                // project names.
+                let bytes = read_state_file(dir, state.as_deref(), name).or(embedded);
                 self.instruments.adopt_lesynth(name, Some(grid), bytes).ok()
             }
             InstrumentSource::Wav { path } => {
