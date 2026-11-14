@@ -27,8 +27,15 @@
 //! amplitude[nh*nb] f32 (row-major, h*nb + b) | phase[nh*nb] f32 |
 //! pitch_ratio[nb] f32 |
 //! bucket_lengths[nb] u32 | dc[nb] f32 | nyquist[nb] f32   (version >= 3 only) |
-//! amp_enabled[nh] u8 | phase_enabled[nh] u8                (version >= 4 only)
+//! amp_enabled[nh] u8 | phase_enabled[nh] u8                (version >= 4 only) |
+//! plugin_state_len u32 | plugin_state[len] u8              (version >= 5 only)
 //! ```
+//!
+//! **Version 5 added the plugin's own state**, opaque to the host: the
+//! Modulation envelope, "Zero phases on keys" and the Synth editor's curve
+//! controls are plugin parameters, which nothing but that state can restore.
+//! [`TrackState`] stays the grid; the state travels beside it
+//! ([`TrackState::write_with_plugin_state`] / `read_with_plugin_state`).
 //!
 //! Version 2 added `display_gain`, without which a reloaded track cannot be
 //! auditioned at its source's level. **Version 3 added the three fields the
@@ -52,7 +59,7 @@ use std::path::Path;
 use anyhow::{bail, ensure, Context, Result};
 
 const MAGIC: [u8; 4] = *b"LSFT";
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 /// magic..sample_rate — the fields every version has.
 const HEADER_V1_LEN: usize = 4 + 4 + 4 + 4 + 4 + 4 + 4;
 /// …plus `display_gain`, from version 2 on. The header is unchanged in v3 and
@@ -118,10 +125,25 @@ impl TrackState {
 }
 
 impl TrackState {
-    /// Serialize to the `.lsft` byte layout.
+    /// Serialize to the `.lsft` byte layout, with no plugin state.
     pub fn to_bytes(&self) -> Vec<u8> {
+        self.to_bytes_with_plugin_state(&[])
+    }
+
+    /// Serialize to the `.lsft` byte layout, carrying `plugin_state` — the
+    /// plugin's own saved state (`PluginInstance::save_state`), opaque here.
+    ///
+    /// That is where everything *beside* the grid lives: the Modulation tab's
+    /// envelope, "Zero phases on keys", and the Synth editor's curve controls.
+    /// They are plugin parameters, which only the plugin's own state can
+    /// restore, so the file carries that state whole rather than a copy of some
+    /// of its fields. Empty means "none": the instrument loads on the plugin's
+    /// defaults for all of them, as every file before version 5 does.
+    pub fn to_bytes_with_plugin_state(&self, plugin_state: &[u8]) -> Vec<u8> {
         let grid = self.num_harmonics * self.num_buckets;
-        let mut out = Vec::with_capacity(HEADER_V2_LEN + (grid * 2 + self.num_buckets) * 4);
+        let mut out = Vec::with_capacity(
+            HEADER_V2_LEN + (grid * 2 + self.num_buckets) * 4 + plugin_state.len(),
+        );
         out.extend_from_slice(&MAGIC);
         out.extend_from_slice(&VERSION.to_le_bytes());
         out.extend_from_slice(&(self.num_harmonics as u32).to_le_bytes());
@@ -157,6 +179,10 @@ impl TrackState {
                 out.push(u8::from(flags.get(h).copied().unwrap_or(true)));
             }
         }
+        // v5 tail: the plugin's own state, length-prefixed. Always written, so
+        // a file without one still has the (zero) length.
+        out.extend_from_slice(&(plugin_state.len() as u32).to_le_bytes());
+        out.extend_from_slice(plugin_state);
         out
     }
 
@@ -164,6 +190,12 @@ impl TrackState {
     /// declared grid size matches the actual byte length exactly (which also
     /// bounds allocation to the input length).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Self::from_bytes_with_plugin_state(bytes).map(|(state, _)| state)
+    }
+
+    /// [`Self::from_bytes`], plus the plugin state the file carries — empty for
+    /// a file older than version 5, or one saved without any.
+    pub fn from_bytes_with_plugin_state(bytes: &[u8]) -> Result<(Self, Vec<u8>)> {
         ensure!(bytes.len() >= HEADER_V1_LEN, "file too short to be a LeSynth track");
         ensure!(bytes[0..4] == MAGIC, "not a LeSynth track (bad magic)");
         let mut cur = 4;
@@ -211,7 +243,16 @@ impl TrackState {
         } else {
             0
         };
-        let expected = header + floats * 4 + flag_bytes;
+        let fixed = header + floats * 4 + flag_bytes;
+        // v5 appends the plugin's state behind a length. The length sits at a
+        // known offset, so it is read first and the size check stays exact.
+        let plugin_state_len = if version >= 5 {
+            ensure!(bytes.len() >= fixed + 4, "truncated .lsft: no plugin state length");
+            4 + u32::from_le_bytes(bytes[fixed..fixed + 4].try_into().unwrap()) as usize
+        } else {
+            0
+        };
+        let expected = fixed + plugin_state_len;
         ensure!(
             bytes.len() == expected,
             "corrupt .lsft: expected {expected} bytes, got {}",
@@ -269,8 +310,13 @@ impl TrackState {
         };
         let amp_enabled = read_flags(&mut cur);
         let phase_enabled = read_flags(&mut cur);
+        let plugin_state = if version >= 5 {
+            bytes[cur + 4..].to_vec()
+        } else {
+            Vec::new()
+        };
 
-        Ok(Self {
+        let state = Self {
             num_harmonics,
             num_buckets,
             base_freq,
@@ -285,21 +331,36 @@ impl TrackState {
             nyquist,
             amp_enabled,
             phase_enabled,
-        })
+        };
+        Ok((state, plugin_state))
     }
 
-    /// Write the track to `path` (creating/truncating it).
+    /// Write the grid alone to `path` (creating/truncating it).
     pub fn write(&self, path: &Path) -> Result<()> {
-        fs::write(path, self.to_bytes())
+        self.write_with_plugin_state(path, &[])
+    }
+
+    /// Write the grid and the plugin's own state to `path` — see
+    /// [`Self::to_bytes_with_plugin_state`].
+    pub fn write_with_plugin_state(&self, path: &Path, plugin_state: &[u8]) -> Result<()> {
+        fs::write(path, self.to_bytes_with_plugin_state(plugin_state))
             .with_context(|| format!("writing track to {}", crate::file_label(path)))
     }
 
-    /// Read a track from `path`.
+    /// Read a track's grid from `path`.
     pub fn read(path: &Path) -> Result<Self> {
+        Self::read_with_plugin_state(path).map(|(state, _)| state)
+    }
+
+    /// Read a track's grid and the plugin state saved with it (`None` when the
+    /// file carries none).
+    pub fn read_with_plugin_state(path: &Path) -> Result<(Self, Option<Vec<u8>>)> {
         let bytes =
             fs::read(path)
                 .with_context(|| format!("reading track from {}", crate::file_label(path)))?;
-        Self::from_bytes(&bytes).with_context(|| format!("parsing {}", crate::file_label(path)))
+        let (state, plugin_state) = Self::from_bytes_with_plugin_state(&bytes)
+            .with_context(|| format!("parsing {}", crate::file_label(path)))?;
+        Ok((state, (!plugin_state.is_empty()).then_some(plugin_state)))
     }
 
     /// Basic shape check: the grids match the declared dimensions. Used before
@@ -381,13 +442,16 @@ mod tests {
     /// minus the fields that version predates, and payload minus the v3 tail.
     fn downgrade(s: &TrackState, version: u32) -> Vec<u8> {
         let cur = s.to_bytes();
-        // Strip whatever the target version predates: the enable flags (v4),
-        // then bucket_lengths + dc + nyquist (v3).
+        // Strip whatever the target version predates: the plugin state's
+        // length (v5; `to_bytes` writes no state), the enable flags (v4), then
+        // bucket_lengths + dc + nyquist (v3).
+        let plugin = 4;
         let flags = s.num_harmonics * 2;
         let exact = s.num_buckets * 3 * 4;
         let drop_tail = match version {
-            0..=2 => flags + exact,
-            3 => flags,
+            0..=2 => plugin + flags + exact,
+            3 => plugin + flags,
+            4 => plugin,
             _ => 0,
         };
         let body = &cur[HEADER_V2_LEN..cur.len() - drop_tail];
@@ -463,6 +527,34 @@ mod tests {
         let back = TrackState::from_bytes(&s.to_bytes()).expect("parses");
         assert_eq!(back.amp_enabled, s.amp_enabled);
         assert_eq!(back.phase_enabled, s.phase_enabled);
+    }
+
+    /// Version 4 predates the plugin state. It must load, with none.
+    #[test]
+    fn reads_version_4_without_a_plugin_state() {
+        let s = sample_state();
+        let (parsed, plugin) =
+            TrackState::from_bytes_with_plugin_state(&downgrade(&s, 4)).expect("v4 parses");
+        assert_eq!(parsed, s);
+        assert!(plugin.is_empty());
+    }
+
+    /// The point of version 5: the plugin's own state — the Modulation
+    /// envelope, "Zero phases on keys", the curve controls — rides in the file
+    /// and comes back byte for byte, beside an untouched grid.
+    #[test]
+    fn version_5_carries_the_plugin_state() {
+        let s = sample_state();
+        let plugin = br#"{"params":{"env_enabled":{"bool":true}}}"#.to_vec();
+        let bytes = s.to_bytes_with_plugin_state(&plugin);
+        let (back, back_plugin) =
+            TrackState::from_bytes_with_plugin_state(&bytes).expect("parses");
+        assert_eq!(back, s);
+        assert_eq!(back_plugin, plugin);
+        // The grid-only reader takes the same file.
+        assert_eq!(TrackState::from_bytes(&bytes).expect("parses"), s);
+        // A state cut short is corruption, not a shorter state.
+        assert!(TrackState::from_bytes(&bytes[..bytes.len() - 1]).is_err());
     }
 
     /// An all-enabled selection is the default, so it round-trips as the default
